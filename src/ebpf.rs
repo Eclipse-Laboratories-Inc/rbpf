@@ -20,6 +20,7 @@
 
 use std::io::Error;
 use std::collections::hash_map::DefaultHasher;
+use std::fmt;
 use std::hash::{Hash, Hasher};
 use byteorder::{ByteOrder, LittleEndian};
 
@@ -418,7 +419,7 @@ pub struct Helper {
 /// See <https://www.kernel.org/doc/Documentation/networking/filter.txt> for the Linux kernel
 /// documentation about eBPF, or <https://github.com/iovisor/bpf-docs/blob/master/eBPF.md> for a
 /// more concise version.
-#[derive(Debug, PartialEq, Clone)]
+#[derive(PartialEq, Clone)]
 pub struct Insn {
     /// Operation code.
     pub opc: u8,
@@ -430,6 +431,14 @@ pub struct Insn {
     pub off: i16,
     /// Immediate value operand.
     pub imm: i32,
+}
+
+impl fmt::Debug for Insn {
+    // Insn { opc: 191, dst: 6, src: 1, off: 0, imm: 0 }
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "Insn {{ opc: 0x{:02x?}, dst: {}, src: {}, off: 0x{:04x?}, imm: 0x{:08x?} }}",
+               self.opc, self.dst, self.src, self.off, self.imm)
+    }
 }
 
 impl Insn {
