@@ -190,8 +190,8 @@ impl EBpfElf {
             format!(
                 "Error: Unresolved symbol ({}) at instruction #{:?} (ELF file offset {:#x})",
                 name,
-                file_offset,
-                file_offset / ebpf::INSN_SIZE
+                file_offset / ebpf::INSN_SIZE,
+                file_offset
             ),
         ))?
     }

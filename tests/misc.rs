@@ -857,7 +857,7 @@ fn test_symbol_unresolved() {
 }
 
 #[test]
-#[should_panic(expected = "Error: Unresolved symbol (log_64) at instruction #4160 (ELF file offset 0x208)")]
+#[should_panic(expected = "Error: Unresolved symbol (log_64) at instruction #520 (ELF file offset 0x1040)")]
 fn test_symbol_unresolved_elf() {
     let mut file = File::open("tests/elfs/unresolved_helper.so").expect("file open failed");
     let mut elf = Vec::new();
