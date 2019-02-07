@@ -6,7 +6,6 @@
 // the MIT license <http://opensource.org/licenses/MIT>, at your option. This file may not be
 // copied, modified, or distributed except according to those terms.
 
-
 // The tests contained in this file are extracted from the unit tests of uBPF software. Each test
 // in this file has a name in the form `test_verifier_<name>`, and corresponds to the
 // (human-readable) code in `ubpf/tree/master/tests/<name>`, available at
@@ -20,6 +19,8 @@
 
 // These are unit tests for the eBPF “verifier”.
 
+#![allow(clippy::deprecated_cfg_attr)]
+#![cfg_attr(rustfmt, rustfmt_skip)]
 
 extern crate solana_rbpf;
 

@@ -6,7 +6,6 @@
 // the MIT license <http://opensource.org/licenses/MIT>, at your option. This file may not be
 // copied, modified, or distributed except according to those terms.
 
-
 // The tests contained in this file are extracted from the unit tests of uBPF software. Each test
 // in this file has a name in the form `test_jit_<name>`, and corresponds to the (human-readable)
 // code in `ubpf/tree/master/tests/<name>`, available at
@@ -19,6 +18,9 @@
 // The very few modifications that have been realized should be indicated.
 
 // These are unit tests for the eBPF JIT compiler.
+
+#![allow(clippy::deprecated_cfg_attr)]
+#![cfg_attr(rustfmt, rustfmt_skip)]
 
 #![cfg_attr(feature = "cargo-clippy", allow(unreadable_literal))]
 #![cfg(not(windows))]
