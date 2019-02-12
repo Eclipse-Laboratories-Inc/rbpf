@@ -659,7 +659,7 @@ mod test {
     }
 
     #[test]
-    fn test_fixuprelative_calls_forward() {
+    fn test_fixup_relative_calls_forward() {
         // call +0
         let mut calls: HashMap<u32, usize> = HashMap::new();
         #[rustfmt::skip]
@@ -701,7 +701,7 @@ mod test {
 
     #[test]
     #[should_panic(expected = "Error: Relative jump at instruction 0 is out of bounds")]
-    fn test_fixuprelative_calls_out_of_bounds_forward() {
+    fn test_fixup_relative_calls_out_of_bounds_forward() {
         let mut calls: HashMap<u32, usize> = HashMap::new();
         // call +5
         #[rustfmt::skip]
