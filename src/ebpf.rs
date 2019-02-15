@@ -34,7 +34,7 @@ pub const INSN_SIZE: usize = 8;
 /// Maximum size of an eBPF program, in bytes.
 pub const PROG_MAX_SIZE: usize = PROG_MAX_INSNS * INSN_SIZE;
 /// Stack for the eBPF stack, in bytes.
-pub const STACK_SIZE: usize = 2048;
+pub const STACK_SIZE: usize = 2048;  // !! Warning: if you change stack size here also change warning in llvm (BPF_RegisterInfo.cpp)
 /// Stack register
 pub const STACK_REG: usize = 10;
 /// First scratch register
