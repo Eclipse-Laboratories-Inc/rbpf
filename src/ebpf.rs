@@ -28,7 +28,7 @@ use byteorder::{ByteOrder, LittleEndian};
 use hash32::{Hash, Hasher, Murmur3Hasher};
 
 /// Maximum number of instructions in an eBPF program.
-pub const PROG_MAX_INSNS: usize = 4096;
+pub const PROG_MAX_INSNS: usize = 65536;
 /// Size of an eBPF instructions, in bytes.
 pub const INSN_SIZE: usize = 8;
 /// Maximum size of an eBPF program, in bytes.
