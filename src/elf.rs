@@ -44,13 +44,26 @@ const TEXT_SECTION_INDEX: usize = 0;
 #[allow(non_camel_case_types)]
 #[derive(Debug, PartialEq, Copy, Clone)]
 pub enum BPFRelocationType {
-    /// none none
+    /// No relocation, placeholder
     R_BPF_NONE = 0,
-    /// word64 S + A
-    R_BPF_64_64 = 1,
-    /// wordclass B + A
+    /// 64 bit relocation of a ldxdw instruction.
+    /// The ldxdw instruction occupies two instruction slots. The 64-bit address
+    /// to load from is split into the 32-bit imm field of each slot. The first
+    /// slot's pre-relocation imm field contains the virtual address (typically same
+    /// as the file offset) of the location to load. Relocation involves calculating
+    /// the post-load 64-bit physical address referenced by the imm field and writing
+    /// that physical address back into the imm fields of the ldxdw instruction.
     R_BPF_64_RELATIVE = 8,
-    /// word32 S + A
+    /// Relocation of a call instruction.  
+    /// The existing imm field contains either an offset of the instruction to jump to
+    /// (think local function call) or a special value of "-1".  If -1 the symbol must
+    /// be looked up in the symbol table.  The relocation entry contains the symbol
+    /// number to call.  In order to support both local jumps and calling external
+    /// symbols a 32-bit hash is computed and stored in the the call instruction's
+    /// 32-bit imm field.  The hash is used later to look up the 64-bit address to
+    /// jump to.  In the case of a local jump the hash is calculated using the current
+    /// program counter and in the case of a symbol the hash is calculated using the
+    /// name of the symbol.
     R_BPF_64_32 = 10,
 }
 
@@ -72,7 +85,6 @@ impl BPFRelocationType {
             elfkit::relocation::RelocationType::R_X86_64_NONE => {
                 Some(BPFRelocationType::R_BPF_NONE)
             }
-            elfkit::relocation::RelocationType::R_X86_64_64 => Some(BPFRelocationType::R_BPF_64_64),
             elfkit::relocation::RelocationType::R_X86_64_RELATIVE => {
                 Some(BPFRelocationType::R_BPF_64_RELATIVE)
             }
