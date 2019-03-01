@@ -42,7 +42,7 @@ pub const FIRST_SCRATCH_REG: usize = 6;
 /// Number of scratch registers
 pub const SCRATCH_REGS: usize = 4;
 /// Max BPF to BPF call depth
-pub const MAX_CALL_DEPTH: usize = 5;
+pub const MAX_CALL_DEPTH: usize = 10;
 
 // eBPF op codes.
 // See also https://www.kernel.org/doc/Documentation/networking/filter.txt
