@@ -137,7 +137,11 @@ impl EBpfElf {
         self.elf
             .sections
             .iter()
-            .filter(|section| section.name == b".rodata" || section.name == b".data.rel.ro")
+            .filter(|section| {
+                section.name == b".rodata"
+                    || section.name == b".data.rel.ro"
+                    || section.name == b".eh_frame"
+            })
             .map(EBpfElf::content_to_bytes)
             .collect()
     }
@@ -365,12 +369,12 @@ impl EBpfElf {
         let mut section_infos = Vec::new();
 
         // .text section mandatory
-        let mut text_section = EBpfElf::get_section_ref(sections, ".text")?;
-        match (&mut text_section.content).as_raw_mut() {
+        let mut section = EBpfElf::get_section_ref(sections, ".text")?;
+        match (&mut section.content).as_raw_mut() {
             Some(bytes) => {
                 section_infos.push(SectionInfo {
-                    va: text_section.header.addr,
-                    len: text_section.header.size,
+                    va: section.header.addr,
+                    len: section.header.size,
                     bytes: bytes,
                 });
             }
@@ -381,13 +385,13 @@ impl EBpfElf {
         };
 
         // .rodata section optional
-        let mut ro_data_section = EBpfElf::get_section_ref(sections, ".rodata");
-        if let Ok(ro_data_section) = ro_data_section {
-            match (&mut ro_data_section.content).as_raw_mut() {
+        let mut section = EBpfElf::get_section_ref(sections, ".rodata");
+        if let Ok(section) = section {
+            match (&mut section.content).as_raw_mut() {
                 Some(bytes) => {
                     section_infos.push(SectionInfo {
-                        va: ro_data_section.header.addr,
-                        len: ro_data_section.header.size,
+                        va: section.header.addr,
+                        len: section.header.size,
                         bytes: bytes,
                     });
                 }
@@ -396,13 +400,28 @@ impl EBpfElf {
         }
 
         // .data.rel.ro optional
-        let mut data_rel_ro_section = EBpfElf::get_section_ref(sections, ".data.rel.ro");
-        if let Ok(data_rel_ro_section) = data_rel_ro_section {
-            match (&mut data_rel_ro_section.content).as_raw_mut() {
+        let mut section = EBpfElf::get_section_ref(sections, ".data.rel.ro");
+        if let Ok(section) = section {
+            match (&mut section.content).as_raw_mut() {
                 Some(bytes) => {
                     section_infos.push(SectionInfo {
-                        va: data_rel_ro_section.header.addr,
-                        len: data_rel_ro_section.header.size,
+                        va: section.header.addr,
+                        len: section.header.size,
+                        bytes: bytes,
+                    });
+                }
+                None => (),
+            };
+        }
+
+        // .eh_frame optional
+        let mut section = EBpfElf::get_section_ref(sections, ".eh_frame");
+        if let Ok(section) = section {
+            match (&mut section.content).as_raw_mut() {
+                Some(bytes) => {
+                    section_infos.push(SectionInfo {
+                        va: section.header.addr,
+                        len: section.header.size,
                         bytes: bytes,
                     });
                 }
@@ -458,10 +477,14 @@ impl EBpfElf {
                         }
                         let target_section = match target_section {
                             Some(i) => i,
-                            None => Err(Error::new(
-                                ErrorKind::Other,
-                                format!("Error: Relocation failed, no loadable section contains virtual address {:x?}", relocation.addr),
-                            ))?,
+                            None =>
+                            // Err(Error::new(
+                            //     ErrorKind::Other,
+                            //     format!("Error: Relocation failed, no loadable section contains virtual address {:x?}", relocation.addr),
+                            // ))?
+                            {
+                                continue;
+                            }
                         };
 
                         // Offset into the section being relocated
@@ -482,11 +505,10 @@ impl EBpfElf {
                             // TODO Skipping this relocation, the virtual address found at this
                             // target location is zero, so don't know how to turn it into a valid physical
                             // address.
-                            // println!(
-                            //     "!! Skipped relocation section {:?} target_offset {:?} va {:x?} Referenced va ({:x?}))",
-                            //     target_section, target_offset, relocation.addr, refd_va
-                            // );
-                            continue;
+                            println!(
+                                "!! Skipped relocation section {:?} target_offset {:?} va {:x?} Referenced va ({:x?}))",
+                                target_section, target_offset, relocation.addr, refd_va
+                            );
                         }
 
                         // Find the section that contains the virtual address to convert
@@ -503,9 +525,9 @@ impl EBpfElf {
                                 ErrorKind::Other,
                                 format!(
                                     "Error: Relocation to section {:?} at virtual address {:x?} failed, no loadable section contains virtual address {:x?}",
-                                    target_section, relocation.addr, refd_va
+                                           target_section, relocation.addr, refd_va
                                 ),
-                            ))?,
+                            ))?
                         };
 
                         // Convert into an offset into the referenced section by subtracting
