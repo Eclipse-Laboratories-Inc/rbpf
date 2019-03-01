@@ -2145,7 +2145,7 @@ mod tests {
 
     #[test]
     fn test_frames() {
-        const DEPTH: usize = 5;
+        const DEPTH: usize = 10;
         const SIZE: usize = 5;
         let mut frames = CallFrames::new(DEPTH, SIZE);
         let mut ptrs: Vec<MemoryRegion> = Vec::new();
