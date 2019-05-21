@@ -27,12 +27,14 @@ extern crate byteorder;
 extern crate combine;
 extern crate hash32;
 extern crate time;
+extern crate log;
 
 use std::u32;
 use std::collections::HashMap;
 use std::io::{Error, ErrorKind};
 use byteorder::{ByteOrder, LittleEndian};
 use elf::EBpfElf;
+use log::trace;
 
 pub mod assembler;
 pub mod disassembler;
@@ -544,12 +546,12 @@ impl<'a> EbpfVmMbuff<'a> {
         let mut pc: usize = entry;
         self.last_insn_count = 0;
         while pc * ebpf::INSN_SIZE < prog.len() {
-            // println!("    BPF: {:5?} {:016x?} frame {:?} pc {:4?} {}",
-            //          self.last_insn_count,
-            //          reg,
-            //          frames.get_frame_index(),
-            //          pc,
-            //          disassembler::to_insn_vec(&prog[pc * ebpf::INSN_SIZE..])[0].desc);
+            trace!("    BPF: {:5?} {:016x?} frame {:?} pc {:4?} {}",
+                     self.last_insn_count,
+                     reg,
+                     frames.get_frame_index(),
+                     pc + 29, // Instruction numbers typically start at 29 in the ELF dump, offset here so the trace aligns with the dump
+                     disassembler::to_insn_vec(&prog[pc * ebpf::INSN_SIZE..])[0].desc);
             let insn = ebpf::get_insn(prog, pc);
             let _dst = insn.dst as usize;
             let _src = insn.src as usize;
