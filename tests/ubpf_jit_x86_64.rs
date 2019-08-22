@@ -321,26 +321,27 @@ fn test_jit_call_memfrob() {
 
 // TODO: helpers::trash_registers needs asm!().
 // Try this again once asm!() is available in stable.
-//#[test]
-//fn test_jit_call_save() {
-    //let prog = &[
-        //0xb7, 0x06, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00,
-        //0xb7, 0x07, 0x00, 0x00, 0x20, 0x00, 0x00, 0x00,
-        //0xb7, 0x08, 0x00, 0x00, 0x00, 0x03, 0x00, 0x00,
-        //0xb7, 0x09, 0x00, 0x00, 0x00, 0x40, 0x00, 0x00,
-        //0x85, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00,
-        //0xb7, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-        //0x4f, 0x60, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-        //0x4f, 0x70, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-        //0x4f, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-        //0x4f, 0x90, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-        //0x95, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
-    //];
-    //let mut vm = EbpfVm::new(Some(prog)).unwrap();
-    //vm.register_helper(2, helpers::trash_registers);
-    //vm.jit_compile().unwrap();
-    //unsafe { assert_eq!(vm.execute_program_jit(&mut []).unwrap(), 0x4321); }
-//}
+#[ignore]
+#[test]
+fn test_jit_call_save() {
+    let prog = &[
+        0xb7, 0x06, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00,
+        0xb7, 0x07, 0x00, 0x00, 0x20, 0x00, 0x00, 0x00,
+        0xb7, 0x08, 0x00, 0x00, 0x00, 0x03, 0x00, 0x00,
+        0xb7, 0x09, 0x00, 0x00, 0x00, 0x40, 0x00, 0x00,
+        0x85, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00,
+        0xb7, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x4f, 0x60, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x4f, 0x70, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x4f, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x4f, 0x90, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x95, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
+    ];
+    let mut vm = EbpfVm::new(Some(prog)).unwrap();
+    vm.register_helper(2, helpers::trash_registers);
+    vm.jit_compile().unwrap();
+    unsafe { assert_eq!(vm.execute_program_jit(&mut []).unwrap(), 0x4321); }
+}
 
 #[test]
 fn test_jit_div32_high_divisor() {
@@ -439,73 +440,78 @@ fn test_jit_err_call_unreg() {
 // also breaks these test
 // // TODO: Should panic!() instead, but I could not make it panic in JIT-compiled code, so the
 // // program returns -1 instead. We can make it write on stderr, though.
-// #[test]
-// //#[should_panic(expected = "[JIT] Error: division by 0")]
-// fn test_jit_err_div64_by_zero_reg() {
-//     let prog = assemble("
-//         mov32 r0, 1
-//         mov32 r1, 0
-//         div r0, r1
-//         exit").unwrap();
-//     let mut vm = EbpfVm::new(Some(&prog)).unwrap();
-//     vm.jit_compile().unwrap();
-//     unsafe { assert_eq!(vm.execute_program_jit(&mut []).unwrap(), 0xffffffffffffffff); }
-// }
+#[ignore]
+#[test]
+//#[should_panic(expected = "[JIT] Error: division by 0")]
+fn test_jit_err_div64_by_zero_reg() {
+    let prog = assemble("
+        mov32 r0, 1
+        mov32 r1, 0
+        div r0, r1
+        exit").unwrap();
+    let mut vm = EbpfVm::new(Some(&prog)).unwrap();
+    vm.jit_compile().unwrap();
+    unsafe { assert_eq!(vm.execute_program_jit(&mut []).unwrap(), 0xffffffffffffffff); }
+}
 
-// // TODO: Same remark as above
-// #[test]
-// //#[should_panic(expected = "[JIT] Error: division by 0")]
-// fn test_jit_err_div_by_zero_reg() {
-//     let prog = assemble("
-//         mov32 r0, 1
-//         mov32 r1, 0
-//         div32 r0, r1
-//         exit").unwrap();
-//     let mut vm = EbpfVm::new(Some(&prog)).unwrap();
-//     vm.jit_compile().unwrap();
-//     unsafe { assert_eq!(vm.execute_program_jit(&mut []).unwrap(), 0xffffffffffffffff); }
-// }
+// TODO: Same remark as above
+#[ignore]
+#[test]
+//#[should_panic(expected = "[JIT] Error: division by 0")]
+fn test_jit_err_div_by_zero_reg() {
+    let prog = assemble("
+        mov32 r0, 1
+        mov32 r1, 0
+        div32 r0, r1
+        exit").unwrap();
+    let mut vm = EbpfVm::new(Some(&prog)).unwrap();
+    vm.jit_compile().unwrap();
+    unsafe { assert_eq!(vm.execute_program_jit(&mut []).unwrap(), 0xffffffffffffffff); }
+}
 
-// // TODO: Same remark as above
-// #[test]
-// //#[should_panic(expected = "[JIT] Error: division by 0")]
-// fn test_jit_err_mod64_by_zero_reg() {
-//     let prog = assemble("
-//         mov32 r0, 1
-//         mov32 r1, 0
-//         mod r0, r1
-//         exit").unwrap();
-//     let mut vm = EbpfVm::new(Some(&prog)).unwrap();
-//     vm.jit_compile().unwrap();
-//     unsafe { assert_eq!(vm.execute_program_jit(&mut []).unwrap(), 0xffffffffffffffff); }
-// }
+// TODO: Same remark as above
+#[ignore]
+#[test]
+//#[should_panic(expected = "[JIT] Error: division by 0")]
+fn test_jit_err_mod64_by_zero_reg() {
+    let prog = assemble("
+        mov32 r0, 1
+        mov32 r1, 0
+        mod r0, r1
+        exit").unwrap();
+    let mut vm = EbpfVm::new(Some(&prog)).unwrap();
+    vm.jit_compile().unwrap();
+    unsafe { assert_eq!(vm.execute_program_jit(&mut []).unwrap(), 0xffffffffffffffff); }
+}
 
-// // TODO: Same remark as above
-// #[test]
-// //#[should_panic(expected = "[JIT] Error: division by 0")]
-// fn test_jit_err_mod_by_zero_reg() {
-//     let prog = assemble("
-//         mov32 r0, 1
-//         mov32 r1, 0
-//         mod32 r0, r1
-//         exit").unwrap();
-//     let mut vm = EbpfVm::new(Some(&prog)).unwrap();
-//     vm.jit_compile().unwrap();
-//     unsafe { assert_eq!(vm.execute_program_jit(&mut []).unwrap(), 0xffffffffffffffff); }
-// }
+// TODO: Same remark as above
+#[ignore]
+#[test]
+//#[should_panic(expected = "[JIT] Error: division by 0")]
+fn test_jit_err_mod_by_zero_reg() {
+    let prog = assemble("
+        mov32 r0, 1
+        mov32 r1, 0
+        mod32 r0, r1
+        exit").unwrap();
+    let mut vm = EbpfVm::new(Some(&prog)).unwrap();
+    vm.jit_compile().unwrap();
+    unsafe { assert_eq!(vm.execute_program_jit(&mut []).unwrap(), 0xffffffffffffffff); }
+}
 
 // TODO SKIP: JIT disabled for this testcase (stack oob check not implemented)
-// #[test]
-// #[should_panic(expected = "Error: out of bounds memory store (insn #1)")]
-// fn test_jit_err_stack_out_of_bound() {
-//     let prog = &[
-//         0x72, 0x0a, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-//         0x95, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
-//     ];
-//     let mut vm = EbpfVm::new(Some(prog)).unwrap();
-//     vm.jit_compile().unwrap();
-//     unsafe { vm.execute_program_jit(&mut []).unwrap(); }
-// }
+#[ignore]
+#[test]
+#[should_panic(expected = "Error: out of bounds memory store (insn #1)")]
+fn test_jit_err_stack_out_of_bound() {
+    let prog = &[
+        0x72, 0x0a, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x95, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
+    ];
+    let mut vm = EbpfVm::new(Some(prog)).unwrap();
+    vm.jit_compile().unwrap();
+    unsafe { vm.execute_program_jit(&mut []).unwrap(); }
+}
 
 #[test]
 fn test_jit_exit() {

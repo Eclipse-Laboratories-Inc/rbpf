@@ -21,7 +21,7 @@
 #![allow(clippy::deprecated_cfg_attr)]
 #![cfg_attr(rustfmt, rustfmt_skip)]
 
-use MemoryRegion;
+use crate::memory_region::MemoryRegion;
 use std::any::Any;
 use std::fmt;
 use std::io::Error;
@@ -48,6 +48,30 @@ pub const MAX_CALL_DEPTH: usize = 10;
 /// Instruction numbers typically start at 29 in the ELF dump, use this offset
 /// when reporting so that trace aligns with the dump.
 pub const ELF_INSN_DUMP_OFFSET: usize = 29;
+
+// Memory map
+// +-----------------+
+// | Program         |
+// +-----------------+
+// | Stack           |
+// +-----------------+
+// | Input           |
+// +-----------------+
+// | Heap            |
+// +-----------------+ 
+// The values below providesufficient separations between the map areas. Avoid using
+// 0x0 to distinguish virtual addresses from null pointers.
+// Note: Compiled programs themselves have no direct dependency on these values so
+// they may be modified based on new requirements.
+
+/// Start of the program bits (text and ro segments) in the memory map
+pub const MM_PROGRAM_START: u64 = 0x100000000;
+/// Start of the stack in the memory map
+pub const MM_STACK_START: u64 = 0x200000000;
+/// Start of the heap in the memory map
+pub const MM_HEAP_START: u64 = 0x300000000;
+/// Start of the input buffers in the memory map
+pub const MM_INPUT_START: u64 = 0x400000000;
 
 // eBPF op codes.
 // See also https://www.kernel.org/doc/Documentation/networking/filter.txt
@@ -403,38 +427,27 @@ pub const BPF_CLS_MASK    : u8 = 0x07;
 /// Mask to extract the arithmetic operation code from an instruction operation code.
 pub const BPF_ALU_OP_MASK : u8 = 0xf0;
 
-/// Prototype of an eBPF helper function.
-pub type HelperFunction = fn (u64, u64, u64, u64, u64, &mut Option<Box<dyn Any>>) -> u64;
+/// Context object passed to a helper function, carries along state and/or lifetime
+pub type HelperContext = Option<Box<dyn Any + 'static>>;
 
-/// Prototype of an eBPF helper verification function.
-pub type HelperVerifier = fn (
+/// Prototype of an helper function.
+pub type HelperFunction = fn (
     u64,
     u64,
     u64,
     u64,
     u64,
-    &mut Option<Box<dyn Any>>,
+    &mut HelperContext,
     &[MemoryRegion],
     &[MemoryRegion],
-) -> Result<(()), Error>;
+) -> Result<(u64), Error>;
 
-/// eBPF Helper pair
-/// 
-/// Includes both the helper function itself, but also an optional helper verification function
-/// that if present will be called first to validate the helper parameters.  A verification
-/// function is not needed if the helper treats its arguments as values but if one of
-/// the arguments represent a pointer then that pointer must be verified by the 
-/// verification function.
-/// 
-/// Note: native jitted programs do not have the ability to call the verification programs
-/// so all helpers provided to a jitted function must treat their arguments as values only.
+/// Helper function and its context
 pub struct Helper {
-    /// Called first to verify the helper function's arguments
-    pub verifier: Option<HelperVerifier>,
     /// Actual helper function that does the work
     pub function: HelperFunction,
-    /// Context passed to both the verifier and the function
-    pub context: Option<Box<dyn Any>>,
+    /// Context passed to the helper
+    pub context: HelperContext,
 }
 
 /// An eBPF instruction.

@@ -27,7 +27,6 @@ extern crate byteorder;
 extern crate libc;
 extern crate solana_rbpf;
 
-use std::any::Any;
 use std::fs::File;
 use std::io::{Error, ErrorKind};
 use std::io::Read;
@@ -35,11 +34,13 @@ use std::slice::from_raw_parts;
 use std::str::from_utf8;
 use byteorder::{ByteOrder, LittleEndian};
 use libc::c_char;
-use solana_rbpf::assembler::assemble;
-use solana_rbpf::ebpf;
-use solana_rbpf::helpers;
-use solana_rbpf::MemoryRegion;
-use solana_rbpf::EbpfVm;
+use solana_rbpf::{
+    assembler::assemble,
+    EbpfVm,
+    ebpf,
+    helpers,
+    memory_region::{MemoryRegion, translate_addr},
+};
 
 // The following two examples have been compiled from C with the following command:
 //
@@ -107,93 +108,93 @@ use solana_rbpf::EbpfVm;
 // Cargo.toml file (see comments above), so here we use just the hardcoded bytecode instructions
 // instead.
 
-// TODO jit does not support address translation or helpers
-// #[cfg(not(windows))]
-// #[test]
-// fn test_vm_jit_ldabsb() {
-//     let prog = &[
-//         0x30, 0x00, 0x00, 0x00, 0x03, 0x00, 0x00, 0x00,
-//         0x95, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
-//     ];
-//     let mut mem1 = [
-//         0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77,
-//         0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff,
-//     ];
-//     let mut mem2 = mem1.clone();
-//     let mut vm = EbpfVm::new(Some(prog)).unwrap();
-//     assert_eq!(vm.execute_program(&mut mem1, &[], &[]).unwrap(), 0x33);
+#[ignore] // TODO jit does not support address translation or helpers
+#[cfg(not(windows))]
+#[test]
+fn test_vm_jit_ldabsb() {
+    let prog = &[
+        0x30, 0x00, 0x00, 0x00, 0x03, 0x00, 0x00, 0x00,
+        0x95, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
+    ];
+    let mut mem1 = [
+        0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77,
+        0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff,
+    ];
+    let mut mem2 = mem1.clone();
+    let mut vm = EbpfVm::new(Some(prog)).unwrap();
+    assert_eq!(vm.execute_program(&mut mem1, &[], &[]).unwrap(), 0x33);
 
-//     vm.jit_compile().unwrap();
-//     unsafe {
-//         assert_eq!(vm.execute_program_jit(&mut mem2).unwrap(), 0x33);
-//     };
-// }
+    vm.jit_compile().unwrap();
+    unsafe {
+        assert_eq!(vm.execute_program_jit(&mut mem2).unwrap(), 0x33);
+    };
+}
 
-// TODO jit does not support address translation or helpers
-// #[cfg(not(windows))]
-// #[test]
-// fn test_vm_jit_ldabsh() {
-//     let prog = &[
-//         0x28, 0x00, 0x00, 0x00, 0x03, 0x00, 0x00, 0x00,
-//         0x95, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
-//     ];
-//     let mut mem1 = [
-//         0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77,
-//         0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff,
-//     ];
-//     let mut mem2 = mem1.clone();
-//     let mut vm = EbpfVm::new(Some(prog)).unwrap();
-//     assert_eq!(vm.execute_program(&mut mem1, &[], &[]).unwrap(), 0x4433);
+#[ignore] // TODO jit does not support address translation or helpers
+#[cfg(not(windows))]
+#[test]
+fn test_vm_jit_ldabsh() {
+    let prog = &[
+        0x28, 0x00, 0x00, 0x00, 0x03, 0x00, 0x00, 0x00,
+        0x95, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
+    ];
+    let mut mem1 = [
+        0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77,
+        0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff,
+    ];
+    let mut mem2 = mem1.clone();
+    let mut vm = EbpfVm::new(Some(prog)).unwrap();
+    assert_eq!(vm.execute_program(&mut mem1, &[], &[]).unwrap(), 0x4433);
 
-//     vm.jit_compile().unwrap();
-//     unsafe {
-//         assert_eq!(vm.execute_program_jit(&mut mem2).unwrap(), 0x4433);
-//     };
-// }
+    vm.jit_compile().unwrap();
+    unsafe {
+        assert_eq!(vm.execute_program_jit(&mut mem2).unwrap(), 0x4433);
+    };
+}
 
-// TODO jit does not support address translation or helpers
-// #[cfg(not(windows))]
-// #[test]
-// fn test_vm_jit_ldabsw() {
-//     let prog = &[
-//         0x20, 0x00, 0x00, 0x00, 0x03, 0x00, 0x00, 0x00,
-//         0x95, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
-//     ];
-//     let mut mem1 =[
-//         0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77,
-//         0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff,
-//     ];
-//     let mut mem2 = mem1.clone();
-//     let mut vm = EbpfVm::new(Some(prog)).unwrap();
-//     assert_eq!(vm.execute_program(&mut mem1, &[], &[]).unwrap(), 0x66554433);
+#[ignore] // TODO jit does not support address translation or helpers
+#[cfg(not(windows))]
+#[test]
+fn test_vm_jit_ldabsw() {
+    let prog = &[
+        0x20, 0x00, 0x00, 0x00, 0x03, 0x00, 0x00, 0x00,
+        0x95, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
+    ];
+    let mut mem1 =[
+        0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77,
+        0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff,
+    ];
+    let mut mem2 = mem1.clone();
+    let mut vm = EbpfVm::new(Some(prog)).unwrap();
+    assert_eq!(vm.execute_program(&mut mem1, &[], &[]).unwrap(), 0x66554433);
 
-//     vm.jit_compile().unwrap();
-//     unsafe {
-//         assert_eq!(vm.execute_program_jit(&mut mem2).unwrap(), 0x66554433);
-//     };
-// }
+    vm.jit_compile().unwrap();
+    unsafe {
+        assert_eq!(vm.execute_program_jit(&mut mem2).unwrap(), 0x66554433);
+    };
+}
 
-// TODO jit does not support address translation or helpers
-// #[cfg(not(windows))]
-// #[test]
-// fn test_vm_jit_ldabsdw() {
-//     let prog = &[
-//         0x38, 0x00, 0x00, 0x00, 0x03, 0x00, 0x00, 0x00,
-//         0x95, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
-//     ];
-//     let mut mem1 = [
-//         0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77,
-//         0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff,
-//     ];
-//     let mut mem2 = mem1.clone();
-//     let mut vm = EbpfVm::new(Some(prog)).unwrap();
-//     assert_eq!(vm.execute_program(&mut mem1, &[], &[]).unwrap(), 0xaa99887766554433);
+#[ignore] // TODO jit does not support address translation or helpers
+#[cfg(not(windows))]
+#[test]
+fn test_vm_jit_ldabsdw() {
+    let prog = &[
+        0x38, 0x00, 0x00, 0x00, 0x03, 0x00, 0x00, 0x00,
+        0x95, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
+    ];
+    let mut mem1 = [
+        0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77,
+        0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff,
+    ];
+    let mut mem2 = mem1.clone();
+    let mut vm = EbpfVm::new(Some(prog)).unwrap();
+    assert_eq!(vm.execute_program(&mut mem1, &[], &[]).unwrap(), 0xaa99887766554433);
 
-//     vm.jit_compile().unwrap();
-//     unsafe {
-//         assert_eq!(vm.execute_program_jit(&mut mem2).unwrap(), 0xaa99887766554433);
-//     };
-// }
+    vm.jit_compile().unwrap();
+    unsafe {
+        assert_eq!(vm.execute_program_jit(&mut mem2).unwrap(), 0xaa99887766554433);
+    };
+}
 
 #[test]
 #[should_panic(expected = "Error: out of bounds memory load (insn #29),")]
@@ -225,97 +226,97 @@ fn test_vm_err_ldabsb_nomem() {
     // Memory check not implemented for JIT yet.
 }
 
-// TODO jit does not support address translation or helpers
-// #[cfg(not(windows))]
-// #[test]
-// fn test_vm_jit_ldindb() {
-//     let prog = &[
-//         0xb7, 0x01, 0x00, 0x00, 0x05, 0x00, 0x00, 0x00,
-//         0x50, 0x10, 0x00, 0x00, 0x03, 0x00, 0x00, 0x00,
-//         0x95, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
-//     ];
-//     let mut mem1 = [
-//         0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77,
-//         0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff,
-//     ];
-//     let mut mem2 = mem1.clone();
-//     let mut vm = EbpfVm::new(Some(prog)).unwrap();
-//     assert_eq!(vm.execute_program(&mut mem1, &[], &[]).unwrap(), 0x88);
+#[ignore] // TODO jit does not support address translation or helpers
+#[cfg(not(windows))]
+#[test]
+fn test_vm_jit_ldindb() {
+    let prog = &[
+        0xb7, 0x01, 0x00, 0x00, 0x05, 0x00, 0x00, 0x00,
+        0x50, 0x10, 0x00, 0x00, 0x03, 0x00, 0x00, 0x00,
+        0x95, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
+    ];
+    let mut mem1 = [
+        0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77,
+        0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff,
+    ];
+    let mut mem2 = mem1.clone();
+    let mut vm = EbpfVm::new(Some(prog)).unwrap();
+    assert_eq!(vm.execute_program(&mut mem1, &[], &[]).unwrap(), 0x88);
 
-//     vm.jit_compile().unwrap();
-//     unsafe {
-//         assert_eq!(vm.execute_program_jit(&mut mem2).unwrap(), 0x88);
-//     };
-// }
+    vm.jit_compile().unwrap();
+    unsafe {
+        assert_eq!(vm.execute_program_jit(&mut mem2).unwrap(), 0x88);
+    };
+}
 
-// TODO jit does not support address translation or helpers
-// #[cfg(not(windows))]
-// #[test]
-// fn test_vm_jit_ldindh() {
-//     let prog = &[
-//         0xb7, 0x01, 0x00, 0x00, 0x05, 0x00, 0x00, 0x00,
-//         0x48, 0x10, 0x00, 0x00, 0x03, 0x00, 0x00, 0x00,
-//         0x95, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
-//     ];
-//     let mut mem1 = [
-//         0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77,
-//         0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff,
-//     ];
-//     let mut mem2 = mem1.clone();
-//     let mut vm = EbpfVm::new(Some(prog)).unwrap();
-//     assert_eq!(vm.execute_program(&mut mem1, &[], &[]).unwrap(), 0x9988);
+#[ignore] // TODO jit does not support address translation or helpers
+#[cfg(not(windows))]
+#[test]
+fn test_vm_jit_ldindh() {
+    let prog = &[
+        0xb7, 0x01, 0x00, 0x00, 0x05, 0x00, 0x00, 0x00,
+        0x48, 0x10, 0x00, 0x00, 0x03, 0x00, 0x00, 0x00,
+        0x95, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
+    ];
+    let mut mem1 = [
+        0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77,
+        0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff,
+    ];
+    let mut mem2 = mem1.clone();
+    let mut vm = EbpfVm::new(Some(prog)).unwrap();
+    assert_eq!(vm.execute_program(&mut mem1, &[], &[]).unwrap(), 0x9988);
 
-//     vm.jit_compile().unwrap();
-//     unsafe {
-//         assert_eq!(vm.execute_program_jit(&mut mem2).unwrap(), 0x9988);
-//     };
-// }
+    vm.jit_compile().unwrap();
+    unsafe {
+        assert_eq!(vm.execute_program_jit(&mut mem2).unwrap(), 0x9988);
+    };
+}
 
-// TODO jit does not support address translation or helpers
-// #[cfg(not(windows))]
-// #[test]
-// fn test_vm_jit_ldindw() {
-//     let prog = &[
-//         0xb7, 0x01, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00,
-//         0x40, 0x10, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00,
-//         0x95, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
-//     ];
-//     let mut mem1 = [
-//         0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77,
-//         0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff,
-//     ];
-//     let mut mem2 = mem1.clone();
-//     let mut vm = EbpfVm::new(Some(prog)).unwrap();
-//     assert_eq!(vm.execute_program(&mut mem1, &[], &[]).unwrap(), 0x88776655);
+#[ignore] // TODO jit does not support address translation or helpers
+#[cfg(not(windows))]
+#[test]
+fn test_vm_jit_ldindw() {
+    let prog = &[
+        0xb7, 0x01, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00,
+        0x40, 0x10, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00,
+        0x95, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
+    ];
+    let mut mem1 = [
+        0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77,
+        0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff,
+    ];
+    let mut mem2 = mem1.clone();
+    let mut vm = EbpfVm::new(Some(prog)).unwrap();
+    assert_eq!(vm.execute_program(&mut mem1, &[], &[]).unwrap(), 0x88776655);
 
-//     vm.jit_compile().unwrap();
-//     unsafe {
-//         assert_eq!(vm.execute_program_jit(&mut mem2).unwrap(), 0x88776655);
-//     };
-// }
+    vm.jit_compile().unwrap();
+    unsafe {
+        assert_eq!(vm.execute_program_jit(&mut mem2).unwrap(), 0x88776655);
+    };
+}
 
-// TODO jit does not support address translation or helpers
-// #[cfg(not(windows))]
-// #[test]
-// fn test_vm_jit_ldinddw() {
-//     let prog = &[
-//         0xb7, 0x01, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00,
-//         0x58, 0x10, 0x00, 0x00, 0x03, 0x00, 0x00, 0x00,
-//         0x95, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
-//     ];
-//     let mut mem1 = [
-//         0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77,
-//         0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff,
-//     ];
-//     let mut mem2 = mem1.clone();
-//     let mut vm = EbpfVm::new(Some(prog)).unwrap();
-//     assert_eq!(vm.execute_program(&mut mem1, &[], &[]).unwrap(), 0xccbbaa9988776655);
+#[ignore] // TODO jit does not support address translation or helpers
+#[cfg(not(windows))]
+#[test]
+fn test_vm_jit_ldinddw() {
+    let prog = &[
+        0xb7, 0x01, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00,
+        0x58, 0x10, 0x00, 0x00, 0x03, 0x00, 0x00, 0x00,
+        0x95, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
+    ];
+    let mut mem1 = [
+        0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77,
+        0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff,
+    ];
+    let mut mem2 = mem1.clone();
+    let mut vm = EbpfVm::new(Some(prog)).unwrap();
+    assert_eq!(vm.execute_program(&mut mem1, &[], &[]).unwrap(), 0xccbbaa9988776655);
 
-//     vm.jit_compile().unwrap();
-//     unsafe {
-//         assert_eq!(vm.execute_program_jit(&mut mem2).unwrap(), 0xccbbaa9988776655);
-//     };
-// }
+    vm.jit_compile().unwrap();
+    unsafe {
+        assert_eq!(vm.execute_program_jit(&mut mem2).unwrap(), 0xccbbaa9988776655);
+    };
+}
 
 #[test]
 #[should_panic(expected = "Error: out of bounds memory load (insn #30),")]
@@ -405,7 +406,7 @@ fn test_non_terminating() {
         0x95, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
     ];
     let mut vm = EbpfVm::new(Some(prog)).unwrap();
-    vm.register_helper(helpers::BPF_TRACE_PRINTK_IDX, helpers::bpf_trace_printf).unwrap();
+    vm.register_helper(helpers::BPF_TRACE_PRINTK_IDX, helpers::bpf_trace_printf, None).unwrap();
     vm.set_max_instruction_count(1000).unwrap();
     vm.execute_program(&[], &[], &[]).unwrap();
 }
@@ -425,7 +426,7 @@ fn test_non_terminate_capped() {
         0x95, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
     ];
     let mut vm = EbpfVm::new(Some(prog)).unwrap();
-    vm.register_helper(helpers::BPF_TRACE_PRINTK_IDX, helpers::bpf_trace_printf).unwrap();
+    vm.register_helper(helpers::BPF_TRACE_PRINTK_IDX, helpers::bpf_trace_printf, None).unwrap();
     vm.set_max_instruction_count(6).unwrap();
     let _ = vm.execute_program(&[], &[], &[]);
     assert!(vm.get_last_instruction_count() == 6);
@@ -446,7 +447,7 @@ fn test_non_terminate_early() {
         0x95, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
     ];
     let mut vm = EbpfVm::new(Some(prog)).unwrap();
-    vm.register_helper(helpers::BPF_TRACE_PRINTK_IDX, helpers::bpf_trace_printf).unwrap();
+    vm.register_helper(helpers::BPF_TRACE_PRINTK_IDX, helpers::bpf_trace_printf, None).unwrap();
     vm.set_max_instruction_count(1000).unwrap();
     let _ = vm.execute_program(&[], &[], &[]);
     assert!(vm.get_last_instruction_count() == 1000);
@@ -458,52 +459,48 @@ fn test_get_last_instruction_count() {
         0x95, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
     ];
     let mut vm = EbpfVm::new(Some(prog)).unwrap();
-    vm.register_helper(helpers::BPF_TRACE_PRINTK_IDX, helpers::bpf_trace_printf).unwrap();
+    vm.register_helper(helpers::BPF_TRACE_PRINTK_IDX, helpers::bpf_trace_printf, None).unwrap();
     let _ = vm.execute_program(&[], &[], &[]);
     println!("count {:?}", vm.get_last_instruction_count());
     assert!(vm.get_last_instruction_count() == 1);
 }
 
 #[allow(unused_variables)]
-pub fn bpf_helper_string_verify(
-    addr: u64,
-    unused2: u64,
-    unused3: u64,
-    unused4: u64,
-    unused5: u64,
-    _context: &mut Option<Box<dyn Any>>,
-    ro_regions: &[MemoryRegion],
-    unused7: &[MemoryRegion]
-) -> Result<(()), Error> {
-    for region in ro_regions.iter() {
-        if region.addr <= addr && (addr as u64) < region.addr + region.len {
-            let c_buf: *const c_char = addr as *const c_char;
-            let max_size = region.addr + region.len - addr;
-            unsafe {
-                for i in 0..max_size {
-                    if std::ptr::read(c_buf.offset(i as isize)) == 0 {
-                        return Ok(());
-                    }
-                }
+pub fn bpf_helper_string(vm_addr: u64,
+                         len: u64,
+                         unused3: u64,
+                         unused4: u64,
+                         unused5: u64,
+                         _context: &mut ebpf::HelperContext,
+                         ro_regions: &[MemoryRegion],
+                         _rw_regions: &[MemoryRegion]
+) -> Result<(u64), Error> {
+    let host_addr = translate_addr(vm_addr, len as usize, "Load", 0, ro_regions)?;
+    let c_buf: *const c_char = host_addr as *const c_char;
+    unsafe {
+        for i in 0..len {
+            let c = std::ptr::read(c_buf.offset(i as isize));
+            if c == 0 {
+                break;
             }
-            return Err(Error::new(ErrorKind::Other, "Error: Unterminated string"));
-       }
-
+        }
+        let message = from_utf8(from_raw_parts(host_addr as *const u8, len as usize)).unwrap();
+        println!("log: {}", message);
+        return Ok(0);
     }
-    Err(Error::new(ErrorKind::Other, "Error: Load segfault, bad string pointer"))
 }
 
-#[allow(unused_variables)]
-pub fn bpf_helper_string(addr: u64, len: u64, unused3: u64, unused4: u64, unused5: u64, _context: &mut Option<Box<dyn Any>>) -> u64 {
-    let ptr: *const u8 = addr as *const u8;
-    let message = unsafe { from_utf8(from_raw_parts(ptr, len as usize)).unwrap() };
-    println!("log: {:?}", message);
-    0
-}
-
-pub fn bpf_helper_u64 (arg1: u64, arg2: u64, arg3: u64, arg4: u64, arg5: u64, _context: &mut Option<Box<dyn Any>>) -> u64 {
+pub fn bpf_helper_u64(arg1: u64,
+                      arg2: u64,
+                      arg3: u64,
+                      arg4: u64,
+                      arg5: u64,
+                      _context: &mut ebpf::HelperContext,
+                      _ro_regions: &[MemoryRegion],
+                      _rw_regions: &[MemoryRegion]
+) -> Result<(u64), Error> {
     println!("dump_64: {:#x}, {:#x}, {:#x}, {:#x}, {:#x}", arg1, arg2, arg3, arg4, arg5);
-    0
+    Ok(0)
 }
 
 #[test]
@@ -513,8 +510,8 @@ fn test_load_elf() {
     file.read_to_end(&mut elf).unwrap();
 
     let mut vm = EbpfVm::new(None).unwrap();
-    vm.register_helper_ex("log", Some(bpf_helper_string_verify), bpf_helper_string, None).unwrap();
-    vm.register_helper_ex("log_64", None, bpf_helper_u64, None).unwrap();
+    vm.register_helper_ex("log", bpf_helper_string, None).unwrap();
+    vm.register_helper_ex("log_64", bpf_helper_u64, None).unwrap();
     vm.set_elf(&elf).unwrap();
     vm.execute_program(&[], &[], &[]).unwrap();
 }
@@ -526,7 +523,7 @@ fn test_load_elf_empty_noro() {
     file.read_to_end(&mut elf).unwrap();
 
     let mut vm = EbpfVm::new(None).unwrap();
-    vm.register_helper_ex("log_64", None, bpf_helper_u64, None).unwrap();
+    vm.register_helper_ex("log_64", bpf_helper_u64, None).unwrap();
     vm.set_elf(&elf).unwrap();
     vm.execute_program(&[], &[], &[]).unwrap();
 }
@@ -538,7 +535,7 @@ fn test_load_elf_empty_rodata() {
     file.read_to_end(&mut elf).unwrap();
 
     let mut vm = EbpfVm::new(None).unwrap();
-    vm.register_helper_ex("log_64", None, bpf_helper_u64, None).unwrap();
+    vm.register_helper_ex("log_64", bpf_helper_u64, None).unwrap();
     vm.set_elf(&elf).unwrap();
     vm.execute_program(&[], &[], &[]).unwrap();
 }
@@ -546,16 +543,18 @@ fn test_load_elf_empty_rodata() {
 #[test]
 fn test_symbol_relocation() {
         let prog = &mut [
+        0xbf, 0xA1, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // r1 = r10
+        0xb7, 0x02, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, // r2 = 1
         0x85, 0x00, 0x00, 0x00, 0xff, 0xff, 0xff, 0xff, // call -1
         0xb7, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // r0 = 0
         0x95, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // exit
     ];
-    LittleEndian::write_u32(&mut prog[4..8], ebpf::hash_symbol_name(b"log"));
+    LittleEndian::write_u32(&mut prog[20..24], ebpf::hash_symbol_name(b"log"));
 
     let mut mem = [72, 101, 108, 108, 111, 0];
 
     let mut vm = EbpfVm::new(None).unwrap();
-    vm.register_helper_ex("log", Some(bpf_helper_string_verify), bpf_helper_string, None).unwrap();
+    vm.register_helper_ex("log", bpf_helper_string, None).unwrap();
     vm.set_program(prog).unwrap();
     vm.execute_program(&mut mem, &[], &[]).unwrap();
 }
@@ -565,21 +564,20 @@ fn test_helper_parameter_on_stack() {
     let prog = &mut [
         0xbf, 0xA1, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // r1 = r10
         0x07, 0x01, 0x00, 0x00, 0x00, 0xff, 0xff, 0xff, // r1 += -256
+        0xb7, 0x02, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, // r2 = 10
         0x85, 0x00, 0x00, 0x00, 0xff, 0xff, 0xff, 0xff, // call -1
         0xb7, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // r0 = 0
         0x95, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // exit
     ];
-    LittleEndian::write_u32(&mut prog[20..24], ebpf::hash_symbol_name(b"log"));
-
-    let mut mem = [72, 101, 108, 108, 111, 0];
+    LittleEndian::write_u32(&mut prog[28..32], ebpf::hash_symbol_name(b"log"));
 
     let mut vm = EbpfVm::new(Some(prog)).unwrap();
-    vm.register_helper_ex("log", Some(bpf_helper_string_verify), bpf_helper_string, None).unwrap();
-    vm.execute_program(&mut mem, &[], &[]).unwrap();
+    vm.register_helper_ex("log", bpf_helper_string, None).unwrap();
+    vm.execute_program(&[], &[], &[]).unwrap();
 }
 
 #[test]
-#[should_panic(expected = "Error: Load segfault, bad string pointer")]
+#[should_panic(expected = "Error: out of bounds memory Load")]
 fn test_null_string() {
     let prog = &mut [
         0xb7, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // r1 = 0
@@ -592,13 +590,31 @@ fn test_null_string() {
     let mut mem = [72, 101, 108, 108, 111, 0];
 
     let mut vm = EbpfVm::new(Some(prog)).unwrap();
-    vm.register_helper_ex("log", Some(bpf_helper_string_verify), bpf_helper_string, None).unwrap();
+    vm.register_helper_ex("log", bpf_helper_string, None).unwrap();
     vm.execute_program(&mut mem, &[], &[]).unwrap();
 }
 
 #[test]
-#[should_panic(expected = "Error: Unterminated string")]
-fn test_unterminated_string() {
+fn test_helper_string() {
+    let prog = &mut [
+        0xb7, 0x02, 0x00, 0x00, 0x05, 0x00, 0x00, 0x00, // r2 = 5
+        0x85, 0x00, 0x00, 0x00, 0xff, 0xff, 0xff, 0xff, // call -1
+        0xb7, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // r0 = 0
+        0x95, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // exit
+    ];
+    LittleEndian::write_u32(&mut prog[12..16], ebpf::hash_symbol_name(b"log"));
+
+    let mut mem = [72, 101, 108, 108, 111];
+
+    let mut vm = EbpfVm::new(Some(prog)).unwrap();
+    vm.register_helper_ex("log", bpf_helper_string, None).unwrap();
+    vm.execute_program(&mut mem, &[], &[]).unwrap();
+}
+
+#[ignore] // TODO jit does not support address translation or helpers
+#[test]
+#[should_panic(expected = "[JIT] Error: helper verifier function not supported by jit")]
+fn test_jit_call_helper_wo_verifier() {
     let prog = &mut [
         0x85, 0x00, 0x00, 0x00, 0xff, 0xff, 0xff, 0xff, // call -1
         0xb7, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // r0 = 0
@@ -606,31 +622,13 @@ fn test_unterminated_string() {
     ];
     LittleEndian::write_u32(&mut prog[4..8], ebpf::hash_symbol_name(b"log"));
 
-    let mut mem = [72, 101, 108, 108, 111];
+    let mut mem = [72, 101, 108, 108, 111, 0];
 
     let mut vm = EbpfVm::new(Some(prog)).unwrap();
-    vm.register_helper_ex("log", Some(bpf_helper_string_verify), bpf_helper_string, None).unwrap();
-    vm.execute_program(&mut mem, &[], &[]).unwrap();
+    vm.register_helper_ex("log", bpf_helper_string, None).unwrap();
+    vm.jit_compile().unwrap();
+    unsafe { assert_eq!(vm.execute_program_jit(&mut mem).unwrap(), 0); }
 }
-
-// TODO jit does not support address translation or helpers
-// #[test]
-// #[should_panic(expected = "[JIT] Error: helper verifier function not supported by jit")]
-// fn test_jit_call_helper_wo_verifier() {
-//     let prog = &mut [
-//         0x85, 0x00, 0x00, 0x00, 0xff, 0xff, 0xff, 0xff, // call -1
-//         0xb7, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // r0 = 0
-//         0x95, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // exit
-//     ];
-//     LittleEndian::write_u32(&mut prog[4..8], ebpf::hash_symbol_name(b"log"));
-
-//     let mut mem = [72, 101, 108, 108, 111, 0];
-
-//     let mut vm = EbpfVm::new(Some(prog)).unwrap();
-//     vm.register_helper_ex("log", Some(bpf_helper_string_verify), bpf_helper_string, None).unwrap();
-//     vm.jit_compile().unwrap();
-//     unsafe { assert_eq!(vm.execute_program_jit(&mut mem).unwrap(), 0); }
-// }
 
 #[test]
 #[should_panic(expected = "Error: Unresolved symbol at instruction #29")]
@@ -650,14 +648,14 @@ fn test_symbol_unresolved() {
 }
 
 #[test]
-#[should_panic(expected = "Error: Unresolved symbol (log_64) at instruction #549 (ELF file offset 0x1040)")]
+#[should_panic(expected = "Error: Unresolved symbol (log_64) at instruction #550 (ELF file offset 0x1048)")]
 fn test_symbol_unresolved_elf() {
     let mut file = File::open("tests/elfs/unresolved_helper.so").expect("file open failed");
     let mut elf = Vec::new();
     file.read_to_end(&mut elf).unwrap();
 
     let mut vm = EbpfVm::new(None).unwrap();
-    vm.register_helper_ex("log", Some(bpf_helper_string_verify), bpf_helper_string, None).unwrap();
+    vm.register_helper_ex("log", bpf_helper_string, None).unwrap();
     vm.set_elf(&elf).unwrap();
     vm.execute_program(&[], &[], &[]).unwrap();
 }
@@ -668,10 +666,10 @@ fn test_custom_entrypoint() {
     let mut elf = Vec::new();
     file.read_to_end(&mut elf).unwrap();
 
-    elf[24] = 72; // nine instructions should leave only two left in text section
+    elf[24] = 80; // Move entrypoint to later in the text section
 
     let mut vm = EbpfVm::new(None).unwrap();
-    vm.register_helper_ex("log", Some(bpf_helper_string_verify), bpf_helper_string, None).unwrap();
+    vm.register_helper_ex("log", bpf_helper_string, None).unwrap();
     vm.set_elf(&elf).unwrap();
     vm.execute_program(&[], &[], &[]).unwrap();
     assert_eq!(2, vm.get_last_instruction_count());
@@ -684,7 +682,7 @@ fn test_bpf_to_bpf_depth() {
     file.read_to_end(&mut elf).unwrap();
 
     let mut vm = EbpfVm::new(None).unwrap();
-    vm.register_helper_ex("log", Some(bpf_helper_string_verify), bpf_helper_string, None).unwrap();
+    vm.register_helper_ex("log", bpf_helper_string, None).unwrap();
     vm.set_elf(&elf).unwrap();
 
     for i in 0..ebpf::MAX_CALL_DEPTH {
@@ -702,7 +700,7 @@ fn test_bpf_to_bpf_too_deep() {
     file.read_to_end(&mut elf).unwrap();
 
     let mut vm = EbpfVm::new(None).unwrap();
-    vm.register_helper_ex("log", Some(bpf_helper_string_verify), bpf_helper_string, None).unwrap();
+    vm.register_helper_ex("log", bpf_helper_string, None).unwrap();
     vm.set_elf(&elf).unwrap();
 
     let mut mem = [ebpf::MAX_CALL_DEPTH as u8];
@@ -716,11 +714,72 @@ fn test_relative_call() {
     file.read_to_end(&mut elf).unwrap();
 
     let mut vm = EbpfVm::new(None).unwrap();
-    vm.register_helper_ex("log", Some(bpf_helper_string_verify), bpf_helper_string, None).unwrap();
+    vm.register_helper_ex("log", bpf_helper_string, None).unwrap();
     vm.set_elf(&elf).unwrap();
 
     let mut mem = [1 as u8];
     vm.execute_program(&mut mem, &[], &[]).unwrap();
+}
+
+#[test]
+fn test_call_reg() {
+    let prog = &mut [
+        0xb7, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // r0 = 0
+        0xb7, 0x08, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, // r8 = 1
+        0x67, 0x08, 0x00, 0x00, 0x20, 0x00, 0x00, 0x00, // lsh r8, 32
+        0x47, 0x08, 0x00, 0x00, 0x30, 0x00, 0x00, 0x00, // or r8, 48
+        0x8D, 0x00, 0x00, 0x00, 0x08, 0x00, 0x00, 0x00, // callx r8
+        0x95, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // exit
+        0xb7, 0x00, 0x00, 0x00, 0x2a, 0x00, 0x00, 0x00, // r0 = 42
+        0x95, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // exit
+    ];
+
+    let mut vm = EbpfVm::new(None).unwrap();
+    vm.set_program(prog).unwrap();
+    assert_eq!(42, vm.execute_program(&[], &[], &[]).unwrap());
+}
+
+#[test]
+#[should_panic(expected = "Exceeded max BPF to BPF call depth of")]
+fn test_call_reg_stack_depth() {
+    let prog = &mut [
+        0xb7, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, // r0 = 1
+        0x67, 0x00, 0x00, 0x00, 0x20, 0x00, 0x00, 0x00, // lsh r0, 32
+        0x8D, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // callx r0
+        0x95, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // exit
+    ];
+
+    let mut vm = EbpfVm::new(None).unwrap();
+    vm.set_program(prog).unwrap();
+    assert_eq!(42, vm.execute_program(&[], &[], &[]).unwrap());
+}
+
+#[test]
+#[should_panic(expected = "Error: callx at instruction #30 attempted to call outside of the text segment at addr 0x0")]
+fn test_oob_callx_low() {
+    let prog = &mut [
+        0xb7, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // r0 = 0
+        0x8D, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // callx r0
+        0x95, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // exit
+    ];
+    let mut vm = EbpfVm::new(None).unwrap();
+    vm.set_program(prog).unwrap();
+    assert_eq!(42, vm.execute_program(&[], &[], &[]).unwrap());
+}
+
+#[test]
+#[should_panic(expected = "Error: Attempted to call outside of the text segment, pc:")]
+fn test_oob_callx_high() {
+    let prog = &mut [
+        0xb7, 0x00, 0x00, 0x00, 0xff, 0xff, 0xff, 0xff, // r0 = 0
+        0x67, 0x00, 0x00, 0x00, 0x20, 0x00, 0x00, 0x00, // lsh r0, 32
+        0x47, 0x08, 0x00, 0x00, 0xff, 0xff, 0xff, 0xff, // or r0, 0xffffffffr
+        0x8D, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // callx r0
+        0x95, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // exit
+    ];
+    let mut vm = EbpfVm::new(None).unwrap();
+    vm.set_program(prog).unwrap();
+    assert_eq!(42, vm.execute_program(&[], &[], &[]).unwrap());
 }
 
 #[test]
@@ -730,8 +789,8 @@ fn test_bpf_to_bpf_scratch_registers() {
     file.read_to_end(&mut elf).unwrap();
 
     let mut vm = EbpfVm::new(None).unwrap();
-    vm.register_helper_ex("log", Some(bpf_helper_string_verify), bpf_helper_string, None).unwrap();
-    vm.register_helper_ex("log_64", None, bpf_helper_u64, None).unwrap();
+    vm.register_helper_ex("log", bpf_helper_string, None).unwrap();
+    vm.register_helper_ex("log_64", bpf_helper_u64, None).unwrap();
     vm.set_elf(&elf).unwrap();
 
     let mut mem = [1];
@@ -745,8 +804,8 @@ fn test_bpf_to_bpf_pass_stack_reference() {
     file.read_to_end(&mut elf).unwrap();
 
     let mut vm = EbpfVm::new(None).unwrap();
-    vm.register_helper_ex("log", Some(bpf_helper_string_verify), bpf_helper_string, None).unwrap();
-    vm.register_helper_ex("log_64", None, bpf_helper_u64, None).unwrap();
+    vm.register_helper_ex("log", bpf_helper_string, None).unwrap();
+    vm.register_helper_ex("log_64", bpf_helper_u64, None).unwrap();
     vm.set_elf(&elf).unwrap();
 
     assert_eq!(vm.execute_program(&[], &[], &[]).unwrap(), 42);
