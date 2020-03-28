@@ -10,6 +10,7 @@
 
 #![allow(clippy::deprecated_cfg_attr)]
 #![cfg_attr(rustfmt, rustfmt_skip)]
+#![allow(unreachable_code)]
 
 use std;
 use std::mem;
@@ -31,8 +32,6 @@ pub enum JITError {
     #[error("Unknown eBPF opcode {0:#2x} (insn #{1:?})")]
     UnknownOpCode(u8, usize),
 }
-
-const PAGE_SIZE: usize = 4096;
 
 // Special values for target_pc in struct Jump
 const TARGET_OFFSET: isize = ebpf::PROG_MAX_INSNS as isize;
@@ -445,15 +444,21 @@ struct JitMemory<'a> {
 }
 
 impl<'a> JitMemory<'a> {
-    fn new(num_pages: usize) -> JitMemory<'a> {
+    fn new(_num_pages: usize) -> JitMemory<'a> {
+        #[cfg(windows)]
+            {
+                panic!("JIT not supported on windows");
+            }
         let contents: &mut[u8];
+        #[cfg(not(windows))] // Without this block windows will fail ungracefully, hence the panic above
         unsafe {
-            let size = num_pages * PAGE_SIZE;
+            const PAGE_SIZE: usize = 4096;
+            let size = _num_pages * PAGE_SIZE;
             let mut raw: *mut libc::c_void = std::mem::MaybeUninit::uninit().assume_init();
             libc::posix_memalign(&mut raw, PAGE_SIZE, size);
             libc::mprotect(raw, size, libc::PROT_EXEC | libc::PROT_READ | libc::PROT_WRITE);
             std::ptr::write_bytes(raw, 0xc3, size);  // for now, prepopulate with 'RET' calls
-            contents = std::slice::from_raw_parts_mut(raw as *mut u8, num_pages * PAGE_SIZE);
+            contents = std::slice::from_raw_parts_mut(raw as *mut u8, _num_pages * PAGE_SIZE);
         }
 
         JitMemory {

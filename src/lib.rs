@@ -47,7 +47,6 @@ pub mod memory_region;
 pub mod verifier;
 pub mod user_error;
 mod asm_parser;
-#[cfg(not(windows))]
 mod jit;
 
 /// eBPF verification function that returns an error if the program does not meet its requirements.
@@ -815,9 +814,9 @@ impl<'a, E: UserDefinedError> EbpfVm<'a, E> {
     /// // Instantiate a VM.
     /// let mut vm = EbpfVm::<UserError>::new(Some(prog)).unwrap();
     ///
+    /// # #[cfg(not(windows))]
     /// vm.jit_compile();
     /// ```
-    #[cfg(not(windows))]
     pub fn jit_compile(&mut self) -> Result<(), EbpfError<E>> {
         let prog =
         if let Some(ref elf) = self.elf {
