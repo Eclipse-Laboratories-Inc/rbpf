@@ -168,9 +168,7 @@ pub trait InstructionMeter {
 
 struct DefaultInstructionMeter {}
 impl InstructionMeter for DefaultInstructionMeter {
-    fn consume(&mut self, _amount: u64) {
-        println!("default consume {:?}", _amount);
-    }
+    fn consume(&mut self, _amount: u64) {}
     fn get_remaining(&self) -> u64 {
         u64::MAX
     }
@@ -847,7 +845,6 @@ impl<'a, E: UserDefinedError> EbpfVm<'a, E> {
                 },
                 _                => return Err(EbpfError::UnsupportedInstruction(pc)),
             }
-            println!("last {:?} remaining {:?} remaining {:?}", self.last_insn_count, remaining_insn_count, instruction_meter.get_remaining());
             if self.last_insn_count >= remaining_insn_count {
                 return Err(EbpfError::ExceededMaxInstructions(self.total_insn_count));
             }
