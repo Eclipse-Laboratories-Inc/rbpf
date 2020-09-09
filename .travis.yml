@@ -14,7 +14,9 @@ matrix:
 before_script:
 - rustup update
 - rustup component add clippy-preview
+- rustup component add rustfmt
 script:
+- cargo fmt --all -- --check
 - cargo clippy -- --deny=warnings
 - export RUSTFLAGS="-D warnings"; cargo build --verbose
 - export RUSTFLAGS="-D warnings"; cargo test --verbose
