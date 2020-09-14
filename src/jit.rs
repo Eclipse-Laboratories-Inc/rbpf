@@ -19,8 +19,35 @@ use std::fmt::Formatter;
 use std::fmt::Error as FormatterError;
 use std::ops::{Index, IndexMut};
 
-use crate::{vm::JitProgram, error::UserDefinedError, vm::Syscall, call_frames::CALL_FRAME_SIZE, ebpf::{self}};
+use crate::{
+    vm::JitProgram,
+    vm::Syscall,
+    call_frames::CALL_FRAME_SIZE,
+    ebpf::{self},
+    error::UserDefinedError,
+};
 use thiserror::Error;
+
+/// A virtual method table for SyscallObject
+pub struct SyscallObjectVtable {
+    /// Drops the dyn trait object
+    pub drop: fn(*const u8),
+    /// Size of the dyn trait object in bytes
+    pub size: usize,
+    /// Alignment of the dyn trait object in bytes
+    pub align: usize,
+    /// The call method of the SyscallObject
+    pub call: *const u8,
+}
+
+// Could be replaced by https://doc.rust-lang.org/std/raw/struct.TraitObject.html
+/// A dyn trait fat pointer for SyscallObject
+pub struct SyscallTraitObject {
+    /// Pointer to the actual object
+    pub data: *const u8,
+    /// Pointer to the virtual method table
+    pub vtable: *const SyscallObjectVtable,
+}
 
 extern crate libc;
 
@@ -30,12 +57,17 @@ pub enum JITError {
     /// Failed to parse ELF file
     #[error("Unknown eBPF opcode {0:#2x} (insn #{1:?})")]
     UnknownOpCode(u8, usize),
+    #[error("Unknown syscall {0:#x} (insn #{1:?})")]
+    UnknownSyscall(u32, usize),
+    #[error("Unsupported (insn #{0:?})")]
+    Unsupported(usize),
 }
 
 // Special values for target_pc in struct Jump
 const TARGET_OFFSET: isize = ebpf::PROG_MAX_INSNS as isize;
 const TARGET_PC_EXIT:         isize = TARGET_OFFSET + 1;
-const TARGET_PC_DIV_BY_ZERO:  isize = TARGET_OFFSET + 2;
+const TARGET_PC_EPILOGUE:     isize = TARGET_OFFSET + 2;
+const TARGET_PC_DIV_BY_ZERO:  isize = TARGET_OFFSET + 3;
 
 #[derive(Copy, Clone)]
 enum OperandSize {
@@ -58,32 +90,46 @@ const R8:  u8 = 8;
 const R9:  u8 = 9;
 const R10: u8 = 10;
 const R11: u8 = 11;
-//const R12: u8 = 12;
+const R12: u8 = 12;
 const R13: u8 = 13;
 const R14: u8 = 14;
 const R15: u8 = 15;
 
-const REGISTER_MAP_SIZE: usize = 11;
-const REGISTER_MAP: [u8;REGISTER_MAP_SIZE] = [
+// System V AMD64 ABI
+// Works on: Linux, macOS, BSD and Solaris but not on Windows
+const ARGUMENT_REGISTERS: [u8; 6] = [
+    RDI, RSI, RDX, RCX, R8, R9
+];
+const CALLER_SAVED_REGISTERS: [u8; 7] = [
+    RAX, RCX, RDX, RSI, RDI, R8, R9 //, R10, R11: They aren't mapped and this also conveniently leaves R9 at the end, which is the first argument to be spilled
+];
+const CALLEE_SAVED_REGISTERS: [u8; 6] = [
+    RBP, RBX, R12, R13, R14, R15
+];
+
+// Special registers:
+// RDI Pointer to optional typed return value
+// R10 Stores a constant pointer to mem
+// R11 Scratch register for offsetting
+
+const REGISTER_MAP: [u8; 11] = [
     RAX, // 0  return value
-    RDI, // 1  arg 1
-    RSI, // 2  arg 2
-    RDX, // 3  arg 3
-    R9,  // 4  arg 4
-    R8,  // 5  arg 5
-    RBX, // 6  callee-saved
-    R13, // 7  callee-saved
-    R14, // 8  callee-saved
-    R15, // 9  callee-saved
+    ARGUMENT_REGISTERS[1], // 1
+    ARGUMENT_REGISTERS[2], // 2
+    ARGUMENT_REGISTERS[3], // 3
+    ARGUMENT_REGISTERS[4], // 4
+    ARGUMENT_REGISTERS[5], // 5
+    CALLEE_SAVED_REGISTERS[2], // 6
+    CALLEE_SAVED_REGISTERS[3], // 7
+    CALLEE_SAVED_REGISTERS[4], // 8
+    CALLEE_SAVED_REGISTERS[5], // 9
     RBP, // 10 stack pointer
-    // R10 and R11 are used to compute store a constant pointer to mem and to compute offset for
-    // LD_ABS_* and LD_IND_* operations, so they are not mapped to any eBPF register.
 ];
 
 // Return the x86 register for the given eBPF register
 fn map_register(r: u8) -> u8 {
-    assert!(r < REGISTER_MAP_SIZE as u8);
-    REGISTER_MAP[(r % REGISTER_MAP_SIZE as u8) as usize]
+    assert!(r < REGISTER_MAP.len() as u8);
+    REGISTER_MAP[(r % REGISTER_MAP.len() as u8) as usize]
 }
 
 macro_rules! emit_bytes {
@@ -117,6 +163,12 @@ fn emit4(jit: &mut JitMemory, data: u32) {
 #[inline]
 fn emit8(jit: &mut JitMemory, data: u64) {
     emit_bytes!(jit, data, u64);
+}
+
+#[allow(dead_code)]
+#[inline]
+fn emit_debugger_trap(jit: &mut JitMemory) {
+    emit1(jit, 0xcc);
 }
 
 #[inline]
@@ -308,6 +360,16 @@ fn emit_load_imm(jit: &mut JitMemory, dst: u8, imm: i64) {
     }
 }
 
+// Load effective address (64 bit)
+#[allow(dead_code)]
+#[inline]
+fn emit_leaq(jit: &mut JitMemory, src: u8, dst: u8, offset: i32) {
+    emit_basic_rex(jit, 1, dst, src);
+    // leaq src + offset, dst
+    emit1(jit, 0x8d);
+    emit_modrm_and_displacement(jit, dst, src, offset);
+}
+
 // Store register src to [dst + offset]
 #[inline]
 fn emit_store(jit: &mut JitMemory, size: OperandSize, src: u8, dst: u8, offset: i32) {
@@ -358,12 +420,24 @@ fn emit_store_imm32(jit: &mut JitMemory, size: OperandSize, dst: u8, offset: i32
 }
 
 #[inline]
-fn emit_call(jit: &mut JitMemory, target: usize) {
+fn emit_register_saving_before_call(jit: &mut JitMemory) {
+    for reg in CALLER_SAVED_REGISTERS.iter() {
+        emit_push(jit, *reg);
+    }
+}
+
+#[inline]
+fn emit_call(jit: &mut JitMemory, target: i64) {
     // TODO use direct call when possible
-    emit_load_imm(jit, RAX, target as i64);
+    emit_load_imm(jit, RAX, target);
     // callq *%rax
     emit1(jit, 0xff);
     emit1(jit, 0xd0);
+
+    // Restore registers
+    for reg in CALLER_SAVED_REGISTERS.iter().rev() {
+        emit_pop(jit, *reg);
+    }
 }
 
 fn muldivmod(jit: &mut JitMemory, pc: u16, opc: u8, src: u8, dst: u8, imm: i32) {
@@ -468,27 +542,18 @@ impl<'a> JitMemory<'a> {
     }
 
     fn jit_compile<E: UserDefinedError>(&mut self, prog: &[u8],
-                   _syscalls: &HashMap<u32,
+                   syscalls: &HashMap<u32,
                    Syscall<'a, E>>) -> Result<(), JITError> {
-        emit_push(self, RBP);
-        emit_push(self, RBX);
-        emit_push(self, R13);
-        emit_push(self, R14);
-        emit_push(self, R15);
-
-        // RDI: mem
-        // RSI: mem_len
-        // RDX: mem_offset
-
-        // Save mem pointer for use with LD_ABS_* and LD_IND_* instructions
-        emit_mov(self, RDI, R10);
-
-        if map_register(1) != RDX {
-            emit_mov(self, RDX, map_register(1));
+        // Save registers
+        for reg in CALLEE_SAVED_REGISTERS.iter() {
+            emit_push(self, *reg);
+            if *reg == RBP {
+                emit_mov(self, RSP, RBP);
+            }
         }
 
-        // Copy stack pointer to R10
-        emit_mov(self, RSP, map_register(10));
+        // Save mem pointer for use with LD_ABS_* and LD_IND_* instructions
+        emit_mov(self, RSI, R10);
 
         // Allocate stack space
         emit_alu64_imm32(self, 0x81, 5, RSP, CALL_FRAME_SIZE as i32);
@@ -755,78 +820,82 @@ impl<'a> JitMemory<'a> {
                     emit_cmp(self, src, dst);
                     emit_jcc(self, 0x8e, target_pc);
                 },
-                ebpf::CALL_IMM  => {
-                    // TODO
-                    panic!("Syscalls not supported");
-                    // // For JIT, syscalls in use MUST be registered at compile time. They can be
-                    // // updated later, but not created after compiling (we need the address of the
-                    // // syscall function in the JIT-compiled program).
-                    // if let Some(syscall) = syscalls.get(&(insn.imm as u32)) {
-                    //     if syscall.verifier.is_some() {
-                    //         return Err(Error::new(ErrorKind::Other,
-                    //                        format!("[JIT] Error: syscall verifier function not supported by jit (id: {:#x})",
-                    //                                insn.imm as u32)));
-                    //     }
-                    //     // We reserve RCX for shifts
-                    //     emit_mov(self, R9, RCX);
-                    //     emit_call(self, syscall.function as usize);
-                    // } else {
-                    //     return Err(Error::new(ErrorKind::Other,
-                    //                    format!("[JIT] Error: unknown syscall function (id: {:#x})",
-                    //                            insn.imm as u32)));
-                    // };
+                ebpf::CALL_IMM   => {
+                    // Save registers for call before displacement
+                    emit_register_saving_before_call(self);
+
+                    // For JIT, syscalls MUST be registered at compile time. They can be
+                    // updated later, but not created after compiling (we need the address of the
+                    // syscall function in the JIT-compiled program).
+                    let func_ptr = match syscalls.get(&(insn.imm as u32)) {
+                        Some(Syscall::Function(func)) => *func as *const u8,
+                        Some(Syscall::Object(boxed)) => {
+                            let fat_ptr_ptr = unsafe { std::mem::transmute::<_, *const *const SyscallTraitObject>(&boxed) };
+                            let fat_ptr = unsafe { std::mem::transmute::<_, *const SyscallTraitObject>(*fat_ptr_ptr) };
+                            // Displace arguments to make room for RSI
+                            for i in (2..6).rev() {
+                                emit_mov(self, ARGUMENT_REGISTERS[i-1], ARGUMENT_REGISTERS[i]);
+                            }
+                            // RSI is the "&mut self" in the "call" method of the SyscallObject
+                            emit_load_imm(self, RSI, unsafe { (*fat_ptr).data } as i64);
+                            let vtable = unsafe { std::mem::transmute::<_, &SyscallObjectVtable>(&*(*fat_ptr).vtable) };
+                            vtable.call
+                        },
+                        None => {
+                            return Err(JITError::UnknownSyscall(insn.imm as u32, insn_ptr));
+                        }
+                    };
+
+                    // emit_mov(self, R9, R10); // TODO: Pass mem / regions
+                    emit_call(self, func_ptr as i64);
+
+                    // Throw error if the result indicates one
+                    emit_load(self, OperandSize::S64, RDI, map_register(0), 0);
+                    emit_jcc(self, 0x85, TARGET_PC_EPILOGUE);
+
+                    // Store Ok value in result register
+                    emit_load(self, OperandSize::S64, RDI, map_register(0), 8);
                 },
                 ebpf::CALL_REG  => { unimplemented!() },
-                ebpf::EXIT       => {
+                ebpf::EXIT      => {
                     if insn_ptr != prog.len() / ebpf::INSN_SIZE - 1 {
                         emit_jmp(self, TARGET_PC_EXIT);
                     };
                 },
 
-                _                => return Err(JITError::UnknownOpCode(insn.opc, insn_ptr)),
+                _               => return Err(JITError::UnknownOpCode(insn.opc, insn_ptr)),
             }
 
             insn_ptr += 1;
         }
 
-        // Epilogue
+        // Quit gracefully
         set_anchor(self, TARGET_PC_EXIT);
 
-        // Move register 0 into rax
-        if map_register(0) != RAX {
-            emit_mov(self, map_register(0), RAX);
-        }
+        // Store result in optional type
+        emit_store(self, OperandSize::S64, map_register(0), RDI, 8);
+        // Also store that no error occured
+        emit_load_imm(self, map_register(0), 0);
+        emit_store(self, OperandSize::S64, map_register(0), RDI, 0);
+
+        // Epilogue
+        set_anchor(self, TARGET_PC_EPILOGUE);
 
         // Deallocate stack space
         emit_alu64_imm32(self, 0x81, 0, RSP, CALL_FRAME_SIZE as i32);
 
-        emit_pop(self, R15);
-        emit_pop(self, R14);
-        emit_pop(self, R13);
-        emit_pop(self, RBX);
-        emit_pop(self, RBP);
+        // Restore registers
+        for reg in CALLEE_SAVED_REGISTERS.iter().rev() {
+            emit_pop(self, *reg);
+        }
 
         emit1(self, 0xc3); // ret
 
         // Division by zero handler
         set_anchor(self, TARGET_PC_DIV_BY_ZERO);
-        fn log(pc: u64) -> i64 {
-            // Write error message on stderr.
-            // We would like to panic!() instead (but does not work here), or maybe return an
-            // error, that is, if we also turn all other panics into errors someday.
-            // Note: needs `use std::io::Write;`
-            //     let res = writeln!(&mut std::io::stderr(),
-            //                        "[JIT] Error: division by zero (insn {:?})\n", pc);
-            //     match res {
-            //         Ok(_)  => 0,
-            //         Err(_) => -1
-            //     }
-            pc as i64 // Just to prevent warnings
-        };
         emit_mov(self, RCX, RDI); // muldivmod stored pc in RCX
-        emit_call(self, log as usize);
-        emit_load_imm(self, map_register(0), -1);
-        emit_jmp(self, TARGET_PC_EXIT);
+        // TODO: Store error
+        emit_jmp(self, TARGET_PC_EPILOGUE);
         Ok(())
     }
 
@@ -885,7 +954,7 @@ impl<'a> std::fmt::Debug for JitMemory<'a> {
 
 // In the end, this is the only thing we export
 pub fn compile<'a, E: UserDefinedError>(prog: &'a [u8], syscalls: &HashMap<u32, Syscall<'a, E>>)
-    -> Result<JitProgram, JITError> {
+    -> Result<JitProgram<E>, JITError> {
 
     // TODO: check how long the page must be to be sure to support an eBPF program of maximum
     // possible length

@@ -32,7 +32,7 @@ use std::{collections::HashMap, u32};
 pub type Verifier<E> = fn(prog: &[u8]) -> Result<(), E>;
 
 /// eBPF Jit-compiled program.
-pub type JitProgram = unsafe fn(*mut u8, usize, usize) -> u64;
+pub type JitProgram<E> = unsafe fn(*mut u8, usize) -> Result<u64, EbpfError<E>>;
 
 /// Syscall function without context.
 pub type SyscallFunction<E> =
@@ -87,7 +87,7 @@ struct DefaultInstructionMeter {}
 impl InstructionMeter for DefaultInstructionMeter {
     fn consume(&mut self, _amount: u64) {}
     fn get_remaining(&self) -> u64 {
-        u64::MAX
+        std::u64::MAX
     }
 }
 
@@ -115,7 +115,7 @@ impl InstructionMeter for DefaultInstructionMeter {
 /// ```
 pub struct EbpfVm<'a, E: UserDefinedError> {
     executable: &'a dyn Executable<E>,
-    jit: Option<JitProgram>,
+    jit: Option<JitProgram<E>>,
     syscalls: HashMap<u32, Syscall<'a, E>>,
     last_insn_count: u64,
     total_insn_count: u64,
@@ -782,7 +782,7 @@ impl<'a, E: UserDefinedError> EbpfVm<'a, E> {
             _ => mem.as_ptr() as *mut u8,
         };
         match self.jit {
-            Some(jit) => Ok(jit(mem_ptr, mem.len(), 0)),
+            Some(jit) => jit(mem_ptr, mem.len()),
             None => Err(EbpfError::JITNotCompiled),
         }
     }

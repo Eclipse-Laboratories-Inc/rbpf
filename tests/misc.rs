@@ -103,6 +103,70 @@ use thiserror::Error;
 // Cargo.toml file (see comments above), so here we use just the hardcoded bytecode instructions
 // instead.
 
+fn bpf_syscall_string(
+    vm_addr: u64,
+    len: u64,
+    _arg3: u64,
+    _arg4: u64,
+    _arg5: u64,
+    ro_regions: &[MemoryRegion],
+    _rw_regions: &[MemoryRegion],
+) -> Result<u64, EbpfError<UserError>> {
+    let host_addr = translate_addr(vm_addr, len as usize, "Load", 0, ro_regions)?;
+    let c_buf: *const c_char = host_addr as *const c_char;
+    unsafe {
+        for i in 0..len {
+            let c = std::ptr::read(c_buf.offset(i as isize));
+            if c == 0 {
+                break;
+            }
+        }
+        let message = from_utf8(from_raw_parts(host_addr as *const u8, len as usize)).unwrap();
+        println!("log: {}", message);
+        Ok(0)
+    }
+}
+
+fn bpf_syscall_u64(
+    arg1: u64,
+    arg2: u64,
+    arg3: u64,
+    arg4: u64,
+    arg5: u64,
+    _ro_regions: &[MemoryRegion],
+    _rw_regions: &[MemoryRegion],
+) -> Result<u64, EbpfError<UserError>> {
+    println!(
+        "dump_64: {:#x}, {:#x}, {:#x}, {:#x}, {:#x}",
+        arg1, arg2, arg3, arg4, arg5
+    );
+    Ok(0)
+}
+
+struct SyscallWithContext<'a> {
+    context: &'a mut u64,
+}
+impl<'a> SyscallObject<UserError> for SyscallWithContext<'a> {
+    fn call(
+        &mut self,
+        arg1: u64,
+        arg2: u64,
+        arg3: u64,
+        arg4: u64,
+        arg5: u64,
+        _ro_regions: &[MemoryRegion],
+        _rw_regions: &[MemoryRegion],
+    ) -> Result<u64, EbpfError<UserError>> {
+        println!(
+            "SyscallWithContext: {:#x}, {:#x}, {:#x}, {:#x}, {:#x}",
+            arg1, arg2, arg3, arg4, arg5
+        );
+        assert_eq!(*self.context, 42);
+        *self.context = 84;
+        Ok(0)
+    }
+}
+
 #[cfg(not(windows))]
 #[test]
 fn test_vm_jit_ldabsb() {
@@ -594,50 +658,6 @@ fn test_get_total_instruction_count_with_syscall_capped() {
         .unwrap();
 }
 
-pub fn bpf_syscall_string(
-    vm_addr: u64,
-    len: u64,
-    _arg3: u64,
-    _arg4: u64,
-    _arg5: u64,
-    ro_regions: &[MemoryRegion],
-    _rw_regions: &[MemoryRegion],
-) -> Result<u64, EbpfError<UserError>> {
-    let host_addr = translate_addr(vm_addr, len as usize, "Load", 0, ro_regions)?;
-    let c_buf: *const c_char = host_addr as *const c_char;
-    unsafe {
-        for i in 0..len {
-            let c = std::ptr::read(c_buf.offset(i as isize));
-            if c == 0 {
-                break;
-            }
-        }
-        let message = from_utf8(from_raw_parts(host_addr as *const u8, len as usize)).unwrap();
-        println!("log: {}", message);
-        Ok(0)
-    }
-}
-
-pub fn bpf_syscall_u64(
-    arg1: u64,
-    arg2: u64,
-    arg3: u64,
-    arg4: u64,
-    arg5: u64,
-    _ro_regions: &[MemoryRegion],
-    _rw_regions: &[MemoryRegion],
-) -> Result<u64, EbpfError<UserError>> {
-    println!(
-        "dump_64: {:#x}, {:#x}, {:#x}, {:#x}, {:#x}",
-        arg1, arg2, arg3, arg4, arg5
-    );
-    Ok(0)
-}
-
-pub fn user_check(prog: &[u8]) -> Result<(), UserError> {
-    check(prog)
-}
-
 #[test]
 fn test_load_elf() {
     let mut file = File::open("tests/elfs/noop.so").expect("file open failed");
@@ -689,7 +709,7 @@ fn test_symbol_relocation() {
     .unwrap();
     LittleEndian::write_u32(&mut prog[28..32], ebpf::hash_symbol_name(b"log"));
 
-    let mem = [72, 101, 108, 108, 111, 0];
+    let mem = [72, 101, 108, 108, 111];
 
     let executable = EbpfVm::<UserError>::create_executable_from_text_bytes(&prog, None).unwrap();
     let mut vm = EbpfVm::<UserError>::new(executable.as_ref()).unwrap();
@@ -730,7 +750,7 @@ fn test_null_string() {
     .unwrap();
     LittleEndian::write_u32(&mut prog[12..16], ebpf::hash_symbol_name(b"log"));
 
-    let mem = [72, 101, 108, 108, 111, 0];
+    let mem = [72, 101, 108, 108, 111];
 
     let executable = EbpfVm::<UserError>::create_executable_from_text_bytes(&prog, None).unwrap();
     let mut vm = EbpfVm::<UserError>::new(executable.as_ref()).unwrap();
@@ -758,27 +778,33 @@ fn test_syscall_string() {
     vm.execute_program(&mem, &[], &[]).unwrap();
 }
 
-#[ignore] // TODO jit does not support address translation or syscalls
+#[cfg(not(windows))]
 #[test]
-#[should_panic(expected = "[JIT] Error: syscall verifier function not supported by jit")]
-fn test_jit_call_syscall_wo_verifier() {
+fn test_call_syscall() {
     let mut prog = assemble(
         "
+        mov64 r1, 0xAA
+        mov64 r2, 0xBB
+        mov64 r3, 0xCC
+        mov64 r4, 0xDD
+        mov64 r5, 0xEE
         call -0x1
         mov64 r0, 0x0
         exit",
     )
     .unwrap();
-    LittleEndian::write_u32(&mut prog[4..8], ebpf::hash_symbol_name(b"log"));
+    LittleEndian::write_u32(&mut prog[44..48], ebpf::hash_symbol_name(b"log"));
 
-    let mut mem = [72, 101, 108, 108, 111, 0];
+    let mem1 = [];
+    let mut mem2 = mem1;
 
     let executable = EbpfVm::<UserError>::create_executable_from_text_bytes(&prog, None).unwrap();
     let mut vm = EbpfVm::<UserError>::new(executable.as_ref()).unwrap();
-    vm.register_syscall_ex("log", bpf_syscall_string).unwrap();
+    vm.register_syscall_ex("log", bpf_syscall_u64).unwrap();
+    vm.execute_program(&mem1, &[], &[]).unwrap();
     vm.jit_compile().unwrap();
     unsafe {
-        assert_eq!(vm.execute_program_jit(&mut mem).unwrap(), 0);
+        assert_eq!(vm.execute_program_jit(&mut mem2).unwrap(), 0);
     }
 }
 
@@ -794,7 +820,7 @@ fn test_symbol_unresolved() {
     .unwrap();
     LittleEndian::write_u32(&mut prog[4..8], ebpf::hash_symbol_name(b"log"));
 
-    let mem = [72, 101, 108, 108, 111, 0];
+    let mem = [];
 
     let executable = EbpfVm::<UserError>::create_executable_from_text_bytes(&prog, None).unwrap();
     let mut vm = EbpfVm::<UserError>::new(executable.as_ref()).unwrap();
@@ -1021,40 +1047,24 @@ fn test_large_program() {
     }
 }
 
-struct SyscallWithContext<'a> {
-    context: &'a mut u64,
-}
-impl<'a> SyscallObject<UserError> for SyscallWithContext<'a> {
-    fn call(
-        &mut self,
-        _arg1: u64,
-        _arg2: u64,
-        _arg3: u64,
-        _arg4: u64,
-        _arg5: u64,
-        _ro_regions: &[MemoryRegion],
-        _rw_regions: &[MemoryRegion],
-    ) -> Result<u64, EbpfError<UserError>> {
-        assert_eq!(*self.context, 42);
-        *self.context = 84;
-        Ok(0)
-    }
-}
-
 #[test]
-fn test_syscall_with_context() {
+fn test_vm_syscall_with_context() {
     let mut prog = assemble(
         "
-        mov64 r2, 0x5
+        mov64 r1, 0xAA
+        mov64 r2, 0xBB
+        mov64 r3, 0xCC
+        mov64 r4, 0xDD
+        mov64 r5, 0xEE
         call -0x1
         mov64 r0, 0x0
         exit",
     )
     .unwrap();
-    LittleEndian::write_u32(&mut prog[12..16], ebpf::hash_symbol_name(b"syscall"));
+    LittleEndian::write_u32(&mut prog[44..48], ebpf::hash_symbol_name(b"syscall"));
 
-    let mem = [72, 101, 108, 108, 111];
     let mut number = 42;
+
     {
         let executable =
             EbpfVm::<UserError>::create_executable_from_text_bytes(&prog, None).unwrap();
@@ -1066,7 +1076,45 @@ fn test_syscall_with_context() {
             }),
         )
         .unwrap();
-        vm.execute_program(&mem, &[], &[]).unwrap();
+        vm.execute_program(&[], &[], &[]).unwrap();
+    }
+    assert_eq!(number, 84);
+}
+
+#[cfg(not(windows))]
+#[test]
+fn test_jit_syscall_with_context() {
+    let mut prog = assemble(
+        "
+        mov64 r1, 0xAA
+        mov64 r2, 0xBB
+        mov64 r3, 0xCC
+        mov64 r4, 0xDD
+        mov64 r5, 0xEE
+        call -0x1
+        mov64 r0, 0x0
+        exit",
+    )
+    .unwrap();
+    LittleEndian::write_u32(&mut prog[44..48], ebpf::hash_symbol_name(b"syscall"));
+
+    let mut number = 42;
+
+    {
+        let executable =
+            EbpfVm::<UserError>::create_executable_from_text_bytes(&prog, None).unwrap();
+        let mut vm = EbpfVm::<UserError>::new(executable.as_ref()).unwrap();
+        vm.register_syscall_with_context_ex(
+            "syscall",
+            Box::new(SyscallWithContext {
+                context: &mut number,
+            }),
+        )
+        .unwrap();
+        vm.jit_compile().unwrap();
+        unsafe {
+            assert_eq!(vm.execute_program_jit(&mut []).unwrap(), 0);
+        }
     }
     assert_eq!(number, 84);
 }
@@ -1077,6 +1125,10 @@ fn test_fuzz_execute() {
     let mut file = File::open("tests/elfs/pass_stack_reference.so").expect("file open failed");
     let mut elf = Vec::new();
     file.read_to_end(&mut elf).unwrap();
+
+    fn user_check(prog: &[u8]) -> Result<(), UserError> {
+        check(prog)
+    }
 
     println!("mangle the whole file");
     fuzz(
