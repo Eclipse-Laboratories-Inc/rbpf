@@ -37,8 +37,8 @@ fn test_vm_add() {
     )
     .unwrap();
     let executable = EbpfVm::<UserError>::create_executable_from_text_bytes(&prog, None).unwrap();
-    let mut vm = EbpfVm::<UserError>::new(executable.as_ref()).unwrap();
-    assert_eq!(vm.execute_program(&[], &[], &[]).unwrap(), 0x3);
+    let mut vm = EbpfVm::<UserError>::new(executable.as_ref(), &[], &[]).unwrap();
+    assert_eq!(vm.execute_program().unwrap(), 0x3);
 }
 
 #[test]
@@ -67,8 +67,8 @@ fn test_vm_alu64_arith() {
     )
     .unwrap();
     let executable = EbpfVm::<UserError>::create_executable_from_text_bytes(&prog, None).unwrap();
-    let mut vm = EbpfVm::<UserError>::new(executable.as_ref()).unwrap();
-    assert_eq!(vm.execute_program(&[], &[], &[]).unwrap(), 0x2a);
+    let mut vm = EbpfVm::<UserError>::new(executable.as_ref(), &[], &[]).unwrap();
+    assert_eq!(vm.execute_program().unwrap(), 0x2a);
 }
 
 #[test]
@@ -101,8 +101,8 @@ fn test_vm_alu64_bit() {
     )
     .unwrap();
     let executable = EbpfVm::<UserError>::create_executable_from_text_bytes(&prog, None).unwrap();
-    let mut vm = EbpfVm::<UserError>::new(executable.as_ref()).unwrap();
-    assert_eq!(vm.execute_program(&[], &[], &[]).unwrap(), 0x11);
+    let mut vm = EbpfVm::<UserError>::new(executable.as_ref(), &[], &[]).unwrap();
+    assert_eq!(vm.execute_program().unwrap(), 0x11);
 }
 
 #[test]
@@ -131,8 +131,8 @@ fn test_vm_alu_arith() {
     )
     .unwrap();
     let executable = EbpfVm::<UserError>::create_executable_from_text_bytes(&prog, None).unwrap();
-    let mut vm = EbpfVm::<UserError>::new(executable.as_ref()).unwrap();
-    assert_eq!(vm.execute_program(&[], &[], &[]).unwrap(), 0x2a);
+    let mut vm = EbpfVm::<UserError>::new(executable.as_ref(), &[], &[]).unwrap();
+    assert_eq!(vm.execute_program().unwrap(), 0x2a);
 }
 
 #[test]
@@ -163,8 +163,8 @@ fn test_vm_alu_bit() {
     )
     .unwrap();
     let executable = EbpfVm::<UserError>::create_executable_from_text_bytes(&prog, None).unwrap();
-    let mut vm = EbpfVm::<UserError>::new(executable.as_ref()).unwrap();
-    assert_eq!(vm.execute_program(&[], &[], &[]).unwrap(), 0x11);
+    let mut vm = EbpfVm::<UserError>::new(executable.as_ref(), &[], &[]).unwrap();
+    assert_eq!(vm.execute_program().unwrap(), 0x11);
 }
 
 #[test]
@@ -178,8 +178,8 @@ fn test_vm_arsh32_high_shift() {
     )
     .unwrap();
     let executable = EbpfVm::<UserError>::create_executable_from_text_bytes(&prog, None).unwrap();
-    let mut vm = EbpfVm::<UserError>::new(executable.as_ref()).unwrap();
-    assert_eq!(vm.execute_program(&[], &[], &[]).unwrap(), 0x4);
+    let mut vm = EbpfVm::<UserError>::new(executable.as_ref(), &[], &[]).unwrap();
+    assert_eq!(vm.execute_program().unwrap(), 0x4);
 }
 
 #[test]
@@ -193,8 +193,8 @@ fn test_vm_arsh() {
     )
     .unwrap();
     let executable = EbpfVm::<UserError>::create_executable_from_text_bytes(&prog, None).unwrap();
-    let mut vm = EbpfVm::<UserError>::new(executable.as_ref()).unwrap();
-    assert_eq!(vm.execute_program(&[], &[], &[]).unwrap(), 0xffff8000);
+    let mut vm = EbpfVm::<UserError>::new(executable.as_ref(), &[], &[]).unwrap();
+    assert_eq!(vm.execute_program().unwrap(), 0xffff8000);
 }
 
 #[test]
@@ -210,11 +210,8 @@ fn test_vm_arsh64() {
     )
     .unwrap();
     let executable = EbpfVm::<UserError>::create_executable_from_text_bytes(&prog, None).unwrap();
-    let mut vm = EbpfVm::<UserError>::new(executable.as_ref()).unwrap();
-    assert_eq!(
-        vm.execute_program(&[], &[], &[]).unwrap(),
-        0xfffffffffffffff8
-    );
+    let mut vm = EbpfVm::<UserError>::new(executable.as_ref(), &[], &[]).unwrap();
+    assert_eq!(vm.execute_program().unwrap(), 0xfffffffffffffff8);
 }
 
 #[test]
@@ -229,8 +226,8 @@ fn test_vm_arsh_reg() {
     )
     .unwrap();
     let executable = EbpfVm::<UserError>::create_executable_from_text_bytes(&prog, None).unwrap();
-    let mut vm = EbpfVm::<UserError>::new(executable.as_ref()).unwrap();
-    assert_eq!(vm.execute_program(&[], &[], &[]).unwrap(), 0xffff8000);
+    let mut vm = EbpfVm::<UserError>::new(executable.as_ref(), &[], &[]).unwrap();
+    assert_eq!(vm.execute_program().unwrap(), 0xffff8000);
 }
 
 #[test]
@@ -244,8 +241,8 @@ fn test_vm_be16() {
     .unwrap();
     let mem = &mut [0x11, 0x22];
     let executable = EbpfVm::<UserError>::create_executable_from_text_bytes(&prog, None).unwrap();
-    let mut vm = EbpfVm::<UserError>::new(executable.as_ref()).unwrap();
-    assert_eq!(vm.execute_program(mem, &[], &[]).unwrap(), 0x1122);
+    let mut vm = EbpfVm::<UserError>::new(executable.as_ref(), mem, &[]).unwrap();
+    assert_eq!(vm.execute_program().unwrap(), 0x1122);
 }
 
 #[test]
@@ -259,8 +256,8 @@ fn test_vm_be16_high() {
     .unwrap();
     let mem = &mut [0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88];
     let executable = EbpfVm::<UserError>::create_executable_from_text_bytes(&prog, None).unwrap();
-    let mut vm = EbpfVm::<UserError>::new(executable.as_ref()).unwrap();
-    assert_eq!(vm.execute_program(mem, &[], &[]).unwrap(), 0x1122);
+    let mut vm = EbpfVm::<UserError>::new(executable.as_ref(), mem, &[]).unwrap();
+    assert_eq!(vm.execute_program().unwrap(), 0x1122);
 }
 
 #[test]
@@ -274,8 +271,8 @@ fn test_vm_be32() {
     .unwrap();
     let mem = &mut [0x11, 0x22, 0x33, 0x44];
     let executable = EbpfVm::<UserError>::create_executable_from_text_bytes(&prog, None).unwrap();
-    let mut vm = EbpfVm::<UserError>::new(executable.as_ref()).unwrap();
-    assert_eq!(vm.execute_program(mem, &[], &[]).unwrap(), 0x11223344);
+    let mut vm = EbpfVm::<UserError>::new(executable.as_ref(), mem, &[]).unwrap();
+    assert_eq!(vm.execute_program().unwrap(), 0x11223344);
 }
 
 #[test]
@@ -289,8 +286,8 @@ fn test_vm_be32_high() {
     .unwrap();
     let mem = &mut [0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88];
     let executable = EbpfVm::<UserError>::create_executable_from_text_bytes(&prog, None).unwrap();
-    let mut vm = EbpfVm::<UserError>::new(executable.as_ref()).unwrap();
-    assert_eq!(vm.execute_program(mem, &[], &[]).unwrap(), 0x11223344);
+    let mut vm = EbpfVm::<UserError>::new(executable.as_ref(), mem, &[]).unwrap();
+    assert_eq!(vm.execute_program().unwrap(), 0x11223344);
 }
 
 #[test]
@@ -304,11 +301,8 @@ fn test_vm_be64() {
     .unwrap();
     let mem = &mut [0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88];
     let executable = EbpfVm::<UserError>::create_executable_from_text_bytes(&prog, None).unwrap();
-    let mut vm = EbpfVm::<UserError>::new(executable.as_ref()).unwrap();
-    assert_eq!(
-        vm.execute_program(mem, &[], &[]).unwrap(),
-        0x1122334455667788
-    );
+    let mut vm = EbpfVm::<UserError>::new(executable.as_ref(), mem, &[]).unwrap();
+    assert_eq!(vm.execute_program().unwrap(), 0x1122334455667788);
 }
 
 #[test]
@@ -325,9 +319,9 @@ fn test_vm_call() {
     )
     .unwrap();
     let executable = EbpfVm::<UserError>::create_executable_from_text_bytes(&prog, None).unwrap();
-    let mut vm = EbpfVm::<UserError>::new(executable.as_ref()).unwrap();
+    let mut vm = EbpfVm::<UserError>::new(executable.as_ref(), &[], &[]).unwrap();
     vm.register_syscall(0, syscalls::gather_bytes).unwrap();
-    assert_eq!(vm.execute_program(&[], &[], &[]).unwrap(), 0x0102030405);
+    assert_eq!(vm.execute_program().unwrap(), 0x0102030405);
 }
 
 #[test]
@@ -347,12 +341,9 @@ fn test_vm_call_memfrob() {
         0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, //
     ];
     let executable = EbpfVm::<UserError>::create_executable_from_text_bytes(&prog, None).unwrap();
-    let mut vm = EbpfVm::<UserError>::new(executable.as_ref()).unwrap();
+    let mut vm = EbpfVm::<UserError>::new(executable.as_ref(), mem, &[]).unwrap();
     vm.register_syscall(1, syscalls::memfrob).unwrap();
-    assert_eq!(
-        vm.execute_program(mem, &[], &[]).unwrap(),
-        0x102292e2f2c0708
-    );
+    assert_eq!(vm.execute_program().unwrap(), 0x102292e2f2c0708);
 }
 
 // TODO: syscalls::trash_registers needs asm!().
@@ -373,9 +364,9 @@ fn test_vm_call_memfrob() {
 //         0x4f, 0x90, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, //
 //         0x95, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, //
 //     ];
-//     let mut vm = EbpfVm::<UserError>::new(Some(prog)).unwrap();
+//     let mut vm = EbpfVm::<UserError>::new(Some(prog), &[], &[]).unwrap();
 //     vm.register_syscall(2, syscalls::trash_registers, None);
-//     assert_eq!(vm.execute_program(&[], &[], &[]).unwrap(), 0x4321);
+//     assert_eq!(vm.execute_program().unwrap(), 0x4321);
 // }
 
 #[test]
@@ -389,8 +380,8 @@ fn test_vm_div32_high_divisor() {
     )
     .unwrap();
     let executable = EbpfVm::<UserError>::create_executable_from_text_bytes(&prog, None).unwrap();
-    let mut vm = EbpfVm::<UserError>::new(executable.as_ref()).unwrap();
-    assert_eq!(vm.execute_program(&[], &[], &[]).unwrap(), 0x3);
+    let mut vm = EbpfVm::<UserError>::new(executable.as_ref(), &[], &[]).unwrap();
+    assert_eq!(vm.execute_program().unwrap(), 0x3);
 }
 
 #[test]
@@ -403,8 +394,8 @@ fn test_vm_div32_imm() {
     )
     .unwrap();
     let executable = EbpfVm::<UserError>::create_executable_from_text_bytes(&prog, None).unwrap();
-    let mut vm = EbpfVm::<UserError>::new(executable.as_ref()).unwrap();
-    assert_eq!(vm.execute_program(&[], &[], &[]).unwrap(), 0x3);
+    let mut vm = EbpfVm::<UserError>::new(executable.as_ref(), &[], &[]).unwrap();
+    assert_eq!(vm.execute_program().unwrap(), 0x3);
 }
 
 #[test]
@@ -418,8 +409,8 @@ fn test_vm_div32_reg() {
     )
     .unwrap();
     let executable = EbpfVm::<UserError>::create_executable_from_text_bytes(&prog, None).unwrap();
-    let mut vm = EbpfVm::<UserError>::new(executable.as_ref()).unwrap();
-    assert_eq!(vm.execute_program(&[], &[], &[]).unwrap(), 0x3);
+    let mut vm = EbpfVm::<UserError>::new(executable.as_ref(), &[], &[]).unwrap();
+    assert_eq!(vm.execute_program().unwrap(), 0x3);
 }
 
 #[test]
@@ -433,8 +424,8 @@ fn test_vm_div64_imm() {
     )
     .unwrap();
     let executable = EbpfVm::<UserError>::create_executable_from_text_bytes(&prog, None).unwrap();
-    let mut vm = EbpfVm::<UserError>::new(executable.as_ref()).unwrap();
-    assert_eq!(vm.execute_program(&[], &[], &[]).unwrap(), 0x300000000);
+    let mut vm = EbpfVm::<UserError>::new(executable.as_ref(), &[], &[]).unwrap();
+    assert_eq!(vm.execute_program().unwrap(), 0x300000000);
 }
 
 #[test]
@@ -449,8 +440,8 @@ fn test_vm_div64_reg() {
     )
     .unwrap();
     let executable = EbpfVm::<UserError>::create_executable_from_text_bytes(&prog, None).unwrap();
-    let mut vm = EbpfVm::<UserError>::new(executable.as_ref()).unwrap();
-    assert_eq!(vm.execute_program(&[], &[], &[]).unwrap(), 0x300000000);
+    let mut vm = EbpfVm::<UserError>::new(executable.as_ref(), &[], &[]).unwrap();
+    assert_eq!(vm.execute_program().unwrap(), 0x300000000);
 }
 
 #[test]
@@ -464,8 +455,8 @@ fn test_vm_early_exit() {
     )
     .unwrap();
     let executable = EbpfVm::<UserError>::create_executable_from_text_bytes(&prog, None).unwrap();
-    let mut vm = EbpfVm::<UserError>::new(executable.as_ref()).unwrap();
-    assert_eq!(vm.execute_program(&[], &[], &[]).unwrap(), 0x3);
+    let mut vm = EbpfVm::<UserError>::new(executable.as_ref(), &[], &[]).unwrap();
+    assert_eq!(vm.execute_program().unwrap(), 0x3);
 }
 
 // uBPF limits the number of user functions at 64. We don't.
@@ -488,8 +479,8 @@ fn test_vm_err_call_unreg() {
     )
     .unwrap();
     let executable = EbpfVm::<UserError>::create_executable_from_text_bytes(&prog, None).unwrap();
-    let mut vm = EbpfVm::<UserError>::new(executable.as_ref()).unwrap();
-    vm.execute_program(&[], &[], &[]).unwrap();
+    let mut vm = EbpfVm::<UserError>::new(executable.as_ref(), &[], &[]).unwrap();
+    vm.execute_program().unwrap();
 }
 
 #[test]
@@ -504,8 +495,8 @@ fn test_vm_err_div64_by_zero_reg() {
     )
     .unwrap();
     let executable = EbpfVm::<UserError>::create_executable_from_text_bytes(&prog, None).unwrap();
-    let mut vm = EbpfVm::<UserError>::new(executable.as_ref()).unwrap();
-    vm.execute_program(&[], &[], &[]).unwrap();
+    let mut vm = EbpfVm::<UserError>::new(executable.as_ref(), &[], &[]).unwrap();
+    vm.execute_program().unwrap();
 }
 
 #[test]
@@ -520,8 +511,8 @@ fn test_vm_err_div_by_zero_reg() {
     )
     .unwrap();
     let executable = EbpfVm::<UserError>::create_executable_from_text_bytes(&prog, None).unwrap();
-    let mut vm = EbpfVm::<UserError>::new(executable.as_ref()).unwrap();
-    vm.execute_program(&[], &[], &[]).unwrap();
+    let mut vm = EbpfVm::<UserError>::new(executable.as_ref(), &[], &[]).unwrap();
+    vm.execute_program().unwrap();
 }
 
 #[test]
@@ -536,8 +527,8 @@ fn test_vm_err_mod64_by_zero_reg() {
     )
     .unwrap();
     let executable = EbpfVm::<UserError>::create_executable_from_text_bytes(&prog, None).unwrap();
-    let mut vm = EbpfVm::<UserError>::new(executable.as_ref()).unwrap();
-    vm.execute_program(&[], &[], &[]).unwrap();
+    let mut vm = EbpfVm::<UserError>::new(executable.as_ref(), &[], &[]).unwrap();
+    vm.execute_program().unwrap();
 }
 
 #[test]
@@ -552,15 +543,15 @@ fn test_vm_err_mod_by_zero_reg() {
     )
     .unwrap();
     let executable = EbpfVm::<UserError>::create_executable_from_text_bytes(&prog, None).unwrap();
-    let mut vm = EbpfVm::<UserError>::new(executable.as_ref()).unwrap();
-    vm.execute_program(&[], &[], &[]).unwrap();
+    let mut vm = EbpfVm::<UserError>::new(executable.as_ref(), &[], &[]).unwrap();
+    vm.execute_program().unwrap();
 }
 
 // With the introduction of call frames there may be stack regions
 // above or below the current stack, to test out of bounds we have to
 // try significantly further away
 #[test]
-#[should_panic(expected = "AccessViolation(\"store\", 29")]
+#[should_panic(expected = "AccessViolation(29, Store")]
 fn test_vm_err_stack_out_of_bound() {
     let prog = assemble(
         "
@@ -569,8 +560,8 @@ fn test_vm_err_stack_out_of_bound() {
     )
     .unwrap();
     let executable = EbpfVm::<UserError>::create_executable_from_text_bytes(&prog, None).unwrap();
-    let mut vm = EbpfVm::<UserError>::new(executable.as_ref()).unwrap();
-    vm.execute_program(&[], &[], &[]).unwrap();
+    let mut vm = EbpfVm::<UserError>::new(executable.as_ref(), &[], &[]).unwrap();
+    vm.execute_program().unwrap();
 }
 
 #[test]
@@ -582,8 +573,8 @@ fn test_vm_exit() {
     )
     .unwrap();
     let executable = EbpfVm::<UserError>::create_executable_from_text_bytes(&prog, None).unwrap();
-    let mut vm = EbpfVm::<UserError>::new(executable.as_ref()).unwrap();
-    assert_eq!(vm.execute_program(&[], &[], &[]).unwrap(), 0x0);
+    let mut vm = EbpfVm::<UserError>::new(executable.as_ref(), &[], &[]).unwrap();
+    assert_eq!(vm.execute_program().unwrap(), 0x0);
 }
 
 #[test]
@@ -597,8 +588,8 @@ fn test_vm_ja() {
     )
     .unwrap();
     let executable = EbpfVm::<UserError>::create_executable_from_text_bytes(&prog, None).unwrap();
-    let mut vm = EbpfVm::<UserError>::new(executable.as_ref()).unwrap();
-    assert_eq!(vm.execute_program(&[], &[], &[]).unwrap(), 0x1);
+    let mut vm = EbpfVm::<UserError>::new(executable.as_ref(), &[], &[]).unwrap();
+    assert_eq!(vm.execute_program().unwrap(), 0x1);
 }
 
 #[test]
@@ -616,8 +607,8 @@ fn test_vm_jeq_imm() {
     )
     .unwrap();
     let executable = EbpfVm::<UserError>::create_executable_from_text_bytes(&prog, None).unwrap();
-    let mut vm = EbpfVm::<UserError>::new(executable.as_ref()).unwrap();
-    assert_eq!(vm.execute_program(&[], &[], &[]).unwrap(), 0x1);
+    let mut vm = EbpfVm::<UserError>::new(executable.as_ref(), &[], &[]).unwrap();
+    assert_eq!(vm.execute_program().unwrap(), 0x1);
 }
 
 #[test]
@@ -636,8 +627,8 @@ fn test_vm_jeq_reg() {
     )
     .unwrap();
     let executable = EbpfVm::<UserError>::create_executable_from_text_bytes(&prog, None).unwrap();
-    let mut vm = EbpfVm::<UserError>::new(executable.as_ref()).unwrap();
-    assert_eq!(vm.execute_program(&[], &[], &[]).unwrap(), 0x1);
+    let mut vm = EbpfVm::<UserError>::new(executable.as_ref(), &[], &[]).unwrap();
+    assert_eq!(vm.execute_program().unwrap(), 0x1);
 }
 
 #[test]
@@ -655,8 +646,8 @@ fn test_vm_jge_imm() {
     )
     .unwrap();
     let executable = EbpfVm::<UserError>::create_executable_from_text_bytes(&prog, None).unwrap();
-    let mut vm = EbpfVm::<UserError>::new(executable.as_ref()).unwrap();
-    assert_eq!(vm.execute_program(&[], &[], &[]).unwrap(), 0x1);
+    let mut vm = EbpfVm::<UserError>::new(executable.as_ref(), &[], &[]).unwrap();
+    assert_eq!(vm.execute_program().unwrap(), 0x1);
 }
 
 #[test]
@@ -675,8 +666,8 @@ fn test_vm_jle_imm() {
     )
     .unwrap();
     let executable = EbpfVm::<UserError>::create_executable_from_text_bytes(&prog, None).unwrap();
-    let mut vm = EbpfVm::<UserError>::new(executable.as_ref()).unwrap();
-    assert_eq!(vm.execute_program(&[], &[], &[]).unwrap(), 0x1);
+    let mut vm = EbpfVm::<UserError>::new(executable.as_ref(), &[], &[]).unwrap();
+    assert_eq!(vm.execute_program().unwrap(), 0x1);
 }
 
 #[test]
@@ -697,8 +688,8 @@ fn test_vm_jle_reg() {
     )
     .unwrap();
     let executable = EbpfVm::<UserError>::create_executable_from_text_bytes(&prog, None).unwrap();
-    let mut vm = EbpfVm::<UserError>::new(executable.as_ref()).unwrap();
-    assert_eq!(vm.execute_program(&[], &[], &[]).unwrap(), 0x1);
+    let mut vm = EbpfVm::<UserError>::new(executable.as_ref(), &[], &[]).unwrap();
+    assert_eq!(vm.execute_program().unwrap(), 0x1);
 }
 
 #[test]
@@ -716,8 +707,8 @@ fn test_vm_jgt_imm() {
     )
     .unwrap();
     let executable = EbpfVm::<UserError>::create_executable_from_text_bytes(&prog, None).unwrap();
-    let mut vm = EbpfVm::<UserError>::new(executable.as_ref()).unwrap();
-    assert_eq!(vm.execute_program(&[], &[], &[]).unwrap(), 0x1);
+    let mut vm = EbpfVm::<UserError>::new(executable.as_ref(), &[], &[]).unwrap();
+    assert_eq!(vm.execute_program().unwrap(), 0x1);
 }
 
 #[test]
@@ -737,8 +728,8 @@ fn test_vm_jgt_reg() {
     )
     .unwrap();
     let executable = EbpfVm::<UserError>::create_executable_from_text_bytes(&prog, None).unwrap();
-    let mut vm = EbpfVm::<UserError>::new(executable.as_ref()).unwrap();
-    assert_eq!(vm.execute_program(&[], &[], &[]).unwrap(), 0x1);
+    let mut vm = EbpfVm::<UserError>::new(executable.as_ref(), &[], &[]).unwrap();
+    assert_eq!(vm.execute_program().unwrap(), 0x1);
 }
 
 #[test]
@@ -756,8 +747,8 @@ fn test_vm_jlt_imm() {
     )
     .unwrap();
     let executable = EbpfVm::<UserError>::create_executable_from_text_bytes(&prog, None).unwrap();
-    let mut vm = EbpfVm::<UserError>::new(executable.as_ref()).unwrap();
-    assert_eq!(vm.execute_program(&[], &[], &[]).unwrap(), 0x1);
+    let mut vm = EbpfVm::<UserError>::new(executable.as_ref(), &[], &[]).unwrap();
+    assert_eq!(vm.execute_program().unwrap(), 0x1);
 }
 
 #[test]
@@ -777,8 +768,8 @@ fn test_vm_jlt_reg() {
     )
     .unwrap();
     let executable = EbpfVm::<UserError>::create_executable_from_text_bytes(&prog, None).unwrap();
-    let mut vm = EbpfVm::<UserError>::new(executable.as_ref()).unwrap();
-    assert_eq!(vm.execute_program(&[], &[], &[]).unwrap(), 0x1);
+    let mut vm = EbpfVm::<UserError>::new(executable.as_ref(), &[], &[]).unwrap();
+    assert_eq!(vm.execute_program().unwrap(), 0x1);
 }
 
 #[test]
@@ -795,8 +786,8 @@ fn test_vm_jit_bounce() {
     )
     .unwrap();
     let executable = EbpfVm::<UserError>::create_executable_from_text_bytes(&prog, None).unwrap();
-    let mut vm = EbpfVm::<UserError>::new(executable.as_ref()).unwrap();
-    assert_eq!(vm.execute_program(&[], &[], &[]).unwrap(), 0x1);
+    let mut vm = EbpfVm::<UserError>::new(executable.as_ref(), &[], &[]).unwrap();
+    assert_eq!(vm.execute_program().unwrap(), 0x1);
 }
 
 #[test]
@@ -815,8 +806,8 @@ fn test_vm_jne_reg() {
     )
     .unwrap();
     let executable = EbpfVm::<UserError>::create_executable_from_text_bytes(&prog, None).unwrap();
-    let mut vm = EbpfVm::<UserError>::new(executable.as_ref()).unwrap();
-    assert_eq!(vm.execute_program(&[], &[], &[]).unwrap(), 0x1);
+    let mut vm = EbpfVm::<UserError>::new(executable.as_ref(), &[], &[]).unwrap();
+    assert_eq!(vm.execute_program().unwrap(), 0x1);
 }
 
 #[test]
@@ -834,8 +825,8 @@ fn test_vm_jset_imm() {
     )
     .unwrap();
     let executable = EbpfVm::<UserError>::create_executable_from_text_bytes(&prog, None).unwrap();
-    let mut vm = EbpfVm::<UserError>::new(executable.as_ref()).unwrap();
-    assert_eq!(vm.execute_program(&[], &[], &[]).unwrap(), 0x1);
+    let mut vm = EbpfVm::<UserError>::new(executable.as_ref(), &[], &[]).unwrap();
+    assert_eq!(vm.execute_program().unwrap(), 0x1);
 }
 
 #[test]
@@ -854,8 +845,8 @@ fn test_vm_jset_reg() {
     )
     .unwrap();
     let executable = EbpfVm::<UserError>::create_executable_from_text_bytes(&prog, None).unwrap();
-    let mut vm = EbpfVm::<UserError>::new(executable.as_ref()).unwrap();
-    assert_eq!(vm.execute_program(&[], &[], &[]).unwrap(), 0x1);
+    let mut vm = EbpfVm::<UserError>::new(executable.as_ref(), &[], &[]).unwrap();
+    assert_eq!(vm.execute_program().unwrap(), 0x1);
 }
 
 #[test]
@@ -874,8 +865,8 @@ fn test_vm_jsge_imm() {
     )
     .unwrap();
     let executable = EbpfVm::<UserError>::create_executable_from_text_bytes(&prog, None).unwrap();
-    let mut vm = EbpfVm::<UserError>::new(executable.as_ref()).unwrap();
-    assert_eq!(vm.execute_program(&[], &[], &[]).unwrap(), 0x1);
+    let mut vm = EbpfVm::<UserError>::new(executable.as_ref(), &[], &[]).unwrap();
+    assert_eq!(vm.execute_program().unwrap(), 0x1);
 }
 
 #[test]
@@ -896,8 +887,8 @@ fn test_vm_jsge_reg() {
     )
     .unwrap();
     let executable = EbpfVm::<UserError>::create_executable_from_text_bytes(&prog, None).unwrap();
-    let mut vm = EbpfVm::<UserError>::new(executable.as_ref()).unwrap();
-    assert_eq!(vm.execute_program(&[], &[], &[]).unwrap(), 0x1);
+    let mut vm = EbpfVm::<UserError>::new(executable.as_ref(), &[], &[]).unwrap();
+    assert_eq!(vm.execute_program().unwrap(), 0x1);
 }
 
 #[test]
@@ -916,8 +907,8 @@ fn test_vm_jsle_imm() {
     )
     .unwrap();
     let executable = EbpfVm::<UserError>::create_executable_from_text_bytes(&prog, None).unwrap();
-    let mut vm = EbpfVm::<UserError>::new(executable.as_ref()).unwrap();
-    assert_eq!(vm.execute_program(&[], &[], &[]).unwrap(), 0x1);
+    let mut vm = EbpfVm::<UserError>::new(executable.as_ref(), &[], &[]).unwrap();
+    assert_eq!(vm.execute_program().unwrap(), 0x1);
 }
 
 #[test]
@@ -939,8 +930,8 @@ fn test_vm_jsle_reg() {
     )
     .unwrap();
     let executable = EbpfVm::<UserError>::create_executable_from_text_bytes(&prog, None).unwrap();
-    let mut vm = EbpfVm::<UserError>::new(executable.as_ref()).unwrap();
-    assert_eq!(vm.execute_program(&[], &[], &[]).unwrap(), 0x1);
+    let mut vm = EbpfVm::<UserError>::new(executable.as_ref(), &[], &[]).unwrap();
+    assert_eq!(vm.execute_program().unwrap(), 0x1);
 }
 
 #[test]
@@ -958,8 +949,8 @@ fn test_vm_jsgt_imm() {
     )
     .unwrap();
     let executable = EbpfVm::<UserError>::create_executable_from_text_bytes(&prog, None).unwrap();
-    let mut vm = EbpfVm::<UserError>::new(executable.as_ref()).unwrap();
-    assert_eq!(vm.execute_program(&[], &[], &[]).unwrap(), 0x1);
+    let mut vm = EbpfVm::<UserError>::new(executable.as_ref(), &[], &[]).unwrap();
+    assert_eq!(vm.execute_program().unwrap(), 0x1);
 }
 
 #[test]
@@ -978,8 +969,8 @@ fn test_vm_jsgt_reg() {
     )
     .unwrap();
     let executable = EbpfVm::<UserError>::create_executable_from_text_bytes(&prog, None).unwrap();
-    let mut vm = EbpfVm::<UserError>::new(executable.as_ref()).unwrap();
-    assert_eq!(vm.execute_program(&[], &[], &[]).unwrap(), 0x1);
+    let mut vm = EbpfVm::<UserError>::new(executable.as_ref(), &[], &[]).unwrap();
+    assert_eq!(vm.execute_program().unwrap(), 0x1);
 }
 
 #[test]
@@ -997,8 +988,8 @@ fn test_vm_jslt_imm() {
     )
     .unwrap();
     let executable = EbpfVm::<UserError>::create_executable_from_text_bytes(&prog, None).unwrap();
-    let mut vm = EbpfVm::<UserError>::new(executable.as_ref()).unwrap();
-    assert_eq!(vm.execute_program(&[], &[], &[]).unwrap(), 0x1);
+    let mut vm = EbpfVm::<UserError>::new(executable.as_ref(), &[], &[]).unwrap();
+    assert_eq!(vm.execute_program().unwrap(), 0x1);
 }
 
 #[test]
@@ -1018,8 +1009,8 @@ fn test_vm_jslt_reg() {
     )
     .unwrap();
     let executable = EbpfVm::<UserError>::create_executable_from_text_bytes(&prog, None).unwrap();
-    let mut vm = EbpfVm::<UserError>::new(executable.as_ref()).unwrap();
-    assert_eq!(vm.execute_program(&[], &[], &[]).unwrap(), 0x1);
+    let mut vm = EbpfVm::<UserError>::new(executable.as_ref(), &[], &[]).unwrap();
+    assert_eq!(vm.execute_program().unwrap(), 0x1);
 }
 
 #[test]
@@ -1030,11 +1021,8 @@ fn test_vm_lddw() {
     )
     .unwrap();
     let executable = EbpfVm::<UserError>::create_executable_from_text_bytes(&prog, None).unwrap();
-    let mut vm = EbpfVm::<UserError>::new(executable.as_ref()).unwrap();
-    assert_eq!(
-        vm.execute_program(&[], &[], &[]).unwrap(),
-        0x1122334455667788
-    );
+    let mut vm = EbpfVm::<UserError>::new(executable.as_ref(), &[], &[]).unwrap();
+    assert_eq!(vm.execute_program().unwrap(), 0x1122334455667788);
 }
 
 #[test]
@@ -1046,8 +1034,8 @@ fn test_vm_lddw2() {
     )
     .unwrap();
     let executable = EbpfVm::<UserError>::create_executable_from_text_bytes(&prog, None).unwrap();
-    let mut vm = EbpfVm::<UserError>::new(executable.as_ref()).unwrap();
-    assert_eq!(vm.execute_program(&[], &[], &[]).unwrap(), 0x80000000);
+    let mut vm = EbpfVm::<UserError>::new(executable.as_ref(), &[], &[]).unwrap();
+    assert_eq!(vm.execute_program().unwrap(), 0x80000000);
 }
 
 #[test]
@@ -1092,8 +1080,8 @@ fn test_vm_ldxb_all() {
         0x08, 0x09, //
     ];
     let executable = EbpfVm::<UserError>::create_executable_from_text_bytes(&prog, None).unwrap();
-    let mut vm = EbpfVm::<UserError>::new(executable.as_ref()).unwrap();
-    assert_eq!(vm.execute_program(mem, &[], &[]).unwrap(), 0x9876543210);
+    let mut vm = EbpfVm::<UserError>::new(executable.as_ref(), mem, &[]).unwrap();
+    assert_eq!(vm.execute_program().unwrap(), 0x9876543210);
 }
 
 #[test]
@@ -1106,8 +1094,8 @@ fn test_vm_ldxb() {
     .unwrap();
     let mem = &mut [0xaa, 0xbb, 0x11, 0xcc, 0xdd];
     let executable = EbpfVm::<UserError>::create_executable_from_text_bytes(&prog, None).unwrap();
-    let mut vm = EbpfVm::<UserError>::new(executable.as_ref()).unwrap();
-    assert_eq!(vm.execute_program(mem, &[], &[]).unwrap(), 0x11);
+    let mut vm = EbpfVm::<UserError>::new(executable.as_ref(), mem, &[]).unwrap();
+    assert_eq!(vm.execute_program().unwrap(), 0x11);
 }
 
 #[test]
@@ -1123,15 +1111,12 @@ fn test_vm_ldxdw() {
         0x77, 0x88, 0xcc, 0xdd, //
     ];
     let executable = EbpfVm::<UserError>::create_executable_from_text_bytes(&prog, None).unwrap();
-    let mut vm = EbpfVm::<UserError>::new(executable.as_ref()).unwrap();
-    assert_eq!(
-        vm.execute_program(mem, &[], &[]).unwrap(),
-        0x8877665544332211
-    );
+    let mut vm = EbpfVm::<UserError>::new(executable.as_ref(), mem, &[]).unwrap();
+    assert_eq!(vm.execute_program().unwrap(), 0x8877665544332211);
 }
 
 #[test]
-#[should_panic(expected = "AccessViolation(\"load\", 29")]
+#[should_panic(expected = "AccessViolation(29, Load")]
 fn test_vm_ldxdw_oob() {
     let prog = assemble(
         "
@@ -1144,11 +1129,8 @@ fn test_vm_ldxdw_oob() {
         0x77, 0x88, 0xcc, 0xdd, //
     ];
     let executable = EbpfVm::<UserError>::create_executable_from_text_bytes(&prog, None).unwrap();
-    let mut vm = EbpfVm::<UserError>::new(executable.as_ref()).unwrap();
-    assert_eq!(
-        vm.execute_program(mem, &[], &[]).unwrap(),
-        0x8877665544332211
-    );
+    let mut vm = EbpfVm::<UserError>::new(executable.as_ref(), mem, &[]).unwrap();
+    assert_eq!(vm.execute_program().unwrap(), 0x8877665544332211);
 }
 
 #[test]
@@ -1204,8 +1186,8 @@ fn test_vm_ldxh_all() {
         0x00, 0x08, 0x00, 0x09, //
     ];
     let executable = EbpfVm::<UserError>::create_executable_from_text_bytes(&prog, None).unwrap();
-    let mut vm = EbpfVm::<UserError>::new(executable.as_ref()).unwrap();
-    assert_eq!(vm.execute_program(mem, &[], &[]).unwrap(), 0x9876543210);
+    let mut vm = EbpfVm::<UserError>::new(executable.as_ref(), mem, &[]).unwrap();
+    assert_eq!(vm.execute_program().unwrap(), 0x9876543210);
 }
 
 #[test]
@@ -1251,8 +1233,8 @@ fn test_vm_ldxh_all2() {
         0x01, 0x00, 0x02, 0x00, //
     ];
     let executable = EbpfVm::<UserError>::create_executable_from_text_bytes(&prog, None).unwrap();
-    let mut vm = EbpfVm::<UserError>::new(executable.as_ref()).unwrap();
-    assert_eq!(vm.execute_program(mem, &[], &[]).unwrap(), 0x3ff);
+    let mut vm = EbpfVm::<UserError>::new(executable.as_ref(), mem, &[]).unwrap();
+    assert_eq!(vm.execute_program().unwrap(), 0x3ff);
 }
 
 #[test]
@@ -1267,8 +1249,8 @@ fn test_vm_ldxh() {
         0xaa, 0xbb, 0x11, 0x22, 0xcc, 0xdd, //
     ];
     let executable = EbpfVm::<UserError>::create_executable_from_text_bytes(&prog, None).unwrap();
-    let mut vm = EbpfVm::<UserError>::new(executable.as_ref()).unwrap();
-    assert_eq!(vm.execute_program(mem, &[], &[]).unwrap(), 0x2211);
+    let mut vm = EbpfVm::<UserError>::new(executable.as_ref(), mem, &[]).unwrap();
+    assert_eq!(vm.execute_program().unwrap(), 0x2211);
 }
 
 #[test]
@@ -1283,8 +1265,8 @@ fn test_vm_ldxh_same_reg() {
     .unwrap();
     let mem = &mut [0xff, 0xff];
     let executable = EbpfVm::<UserError>::create_executable_from_text_bytes(&prog, None).unwrap();
-    let mut vm = EbpfVm::<UserError>::new(executable.as_ref()).unwrap();
-    assert_eq!(vm.execute_program(mem, &[], &[]).unwrap(), 0x1234);
+    let mut vm = EbpfVm::<UserError>::new(executable.as_ref(), mem, &[]).unwrap();
+    assert_eq!(vm.execute_program().unwrap(), 0x1234);
 }
 
 #[test]
@@ -1332,8 +1314,8 @@ fn test_vm_ldxw_all() {
         0x00, 0x01, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, //
     ];
     let executable = EbpfVm::<UserError>::create_executable_from_text_bytes(&prog, None).unwrap();
-    let mut vm = EbpfVm::<UserError>::new(executable.as_ref()).unwrap();
-    assert_eq!(vm.execute_program(mem, &[], &[]).unwrap(), 0x030f0f);
+    let mut vm = EbpfVm::<UserError>::new(executable.as_ref(), mem, &[]).unwrap();
+    assert_eq!(vm.execute_program().unwrap(), 0x030f0f);
 }
 
 #[test]
@@ -1348,8 +1330,8 @@ fn test_vm_ldxw() {
         0xaa, 0xbb, 0x11, 0x22, 0x33, 0x44, 0xcc, 0xdd, //
     ];
     let executable = EbpfVm::<UserError>::create_executable_from_text_bytes(&prog, None).unwrap();
-    let mut vm = EbpfVm::<UserError>::new(executable.as_ref()).unwrap();
-    assert_eq!(vm.execute_program(mem, &[], &[]).unwrap(), 0x44332211);
+    let mut vm = EbpfVm::<UserError>::new(executable.as_ref(), mem, &[]).unwrap();
+    assert_eq!(vm.execute_program().unwrap(), 0x44332211);
 }
 
 #[test]
@@ -1363,8 +1345,8 @@ fn test_vm_le16() {
     .unwrap();
     let mem = &mut [0x22, 0x11];
     let executable = EbpfVm::<UserError>::create_executable_from_text_bytes(&prog, None).unwrap();
-    let mut vm = EbpfVm::<UserError>::new(executable.as_ref()).unwrap();
-    assert_eq!(vm.execute_program(mem, &[], &[]).unwrap(), 0x1122);
+    let mut vm = EbpfVm::<UserError>::new(executable.as_ref(), mem, &[]).unwrap();
+    assert_eq!(vm.execute_program().unwrap(), 0x1122);
 }
 
 #[test]
@@ -1380,8 +1362,8 @@ fn test_vm_le32() {
         0x44, 0x33, 0x22, 0x11, //
     ];
     let executable = EbpfVm::<UserError>::create_executable_from_text_bytes(&prog, None).unwrap();
-    let mut vm = EbpfVm::<UserError>::new(executable.as_ref()).unwrap();
-    assert_eq!(vm.execute_program(mem, &[], &[]).unwrap(), 0x11223344);
+    let mut vm = EbpfVm::<UserError>::new(executable.as_ref(), mem, &[]).unwrap();
+    assert_eq!(vm.execute_program().unwrap(), 0x11223344);
 }
 
 #[test]
@@ -1397,11 +1379,8 @@ fn test_vm_le64() {
         0x88, 0x77, 0x66, 0x55, 0x44, 0x33, 0x22, 0x11, //
     ];
     let executable = EbpfVm::<UserError>::create_executable_from_text_bytes(&prog, None).unwrap();
-    let mut vm = EbpfVm::<UserError>::new(executable.as_ref()).unwrap();
-    assert_eq!(
-        vm.execute_program(mem, &[], &[]).unwrap(),
-        0x1122334455667788
-    );
+    let mut vm = EbpfVm::<UserError>::new(executable.as_ref(), mem, &[]).unwrap();
+    assert_eq!(vm.execute_program().unwrap(), 0x1122334455667788);
 }
 
 #[test]
@@ -1415,8 +1394,8 @@ fn test_vm_lsh_reg() {
     )
     .unwrap();
     let executable = EbpfVm::<UserError>::create_executable_from_text_bytes(&prog, None).unwrap();
-    let mut vm = EbpfVm::<UserError>::new(executable.as_ref()).unwrap();
-    assert_eq!(vm.execute_program(&[], &[], &[]).unwrap(), 0x10);
+    let mut vm = EbpfVm::<UserError>::new(executable.as_ref(), &[], &[]).unwrap();
+    assert_eq!(vm.execute_program().unwrap(), 0x10);
 }
 
 #[test]
@@ -1431,8 +1410,8 @@ fn test_vm_mod() {
     )
     .unwrap();
     let executable = EbpfVm::<UserError>::create_executable_from_text_bytes(&prog, None).unwrap();
-    let mut vm = EbpfVm::<UserError>::new(executable.as_ref()).unwrap();
-    assert_eq!(vm.execute_program(&[], &[], &[]).unwrap(), 0x5);
+    let mut vm = EbpfVm::<UserError>::new(executable.as_ref(), &[], &[]).unwrap();
+    assert_eq!(vm.execute_program().unwrap(), 0x5);
 }
 
 #[test]
@@ -1445,8 +1424,8 @@ fn test_vm_mod32() {
     )
     .unwrap();
     let executable = EbpfVm::<UserError>::create_executable_from_text_bytes(&prog, None).unwrap();
-    let mut vm = EbpfVm::<UserError>::new(executable.as_ref()).unwrap();
-    assert_eq!(vm.execute_program(&[], &[], &[]).unwrap(), 0x0);
+    let mut vm = EbpfVm::<UserError>::new(executable.as_ref(), &[], &[]).unwrap();
+    assert_eq!(vm.execute_program().unwrap(), 0x0);
 }
 
 #[test]
@@ -1465,8 +1444,8 @@ fn test_vm_mod64() {
     )
     .unwrap();
     let executable = EbpfVm::<UserError>::create_executable_from_text_bytes(&prog, None).unwrap();
-    let mut vm = EbpfVm::<UserError>::new(executable.as_ref()).unwrap();
-    assert_eq!(vm.execute_program(&[], &[], &[]).unwrap(), 0x30ba5a04);
+    let mut vm = EbpfVm::<UserError>::new(executable.as_ref(), &[], &[]).unwrap();
+    assert_eq!(vm.execute_program().unwrap(), 0x30ba5a04);
 }
 
 #[test]
@@ -1479,8 +1458,8 @@ fn test_vm_mov() {
     )
     .unwrap();
     let executable = EbpfVm::<UserError>::create_executable_from_text_bytes(&prog, None).unwrap();
-    let mut vm = EbpfVm::<UserError>::new(executable.as_ref()).unwrap();
-    assert_eq!(vm.execute_program(&[], &[], &[]).unwrap(), 0x1);
+    let mut vm = EbpfVm::<UserError>::new(executable.as_ref(), &[], &[]).unwrap();
+    assert_eq!(vm.execute_program().unwrap(), 0x1);
 }
 
 #[test]
@@ -1492,8 +1471,8 @@ fn test_vm_mov32_imm_large() {
     )
     .unwrap();
     let executable = EbpfVm::<UserError>::create_executable_from_text_bytes(&prog, None).unwrap();
-    let mut vm = EbpfVm::<UserError>::new(executable.as_ref()).unwrap();
-    assert_eq!(vm.execute_program(&[], &[], &[]).unwrap(), 0xffffffff);
+    let mut vm = EbpfVm::<UserError>::new(executable.as_ref(), &[], &[]).unwrap();
+    assert_eq!(vm.execute_program().unwrap(), 0xffffffff);
 }
 
 #[test]
@@ -1506,8 +1485,8 @@ fn test_vm_mov_large() {
     )
     .unwrap();
     let executable = EbpfVm::<UserError>::create_executable_from_text_bytes(&prog, None).unwrap();
-    let mut vm = EbpfVm::<UserError>::new(executable.as_ref()).unwrap();
-    assert_eq!(vm.execute_program(&[], &[], &[]).unwrap(), 0xffffffff);
+    let mut vm = EbpfVm::<UserError>::new(executable.as_ref(), &[], &[]).unwrap();
+    assert_eq!(vm.execute_program().unwrap(), 0xffffffff);
 }
 
 #[test]
@@ -1520,8 +1499,8 @@ fn test_vm_mul32_imm() {
     )
     .unwrap();
     let executable = EbpfVm::<UserError>::create_executable_from_text_bytes(&prog, None).unwrap();
-    let mut vm = EbpfVm::<UserError>::new(executable.as_ref()).unwrap();
-    assert_eq!(vm.execute_program(&[], &[], &[]).unwrap(), 0xc);
+    let mut vm = EbpfVm::<UserError>::new(executable.as_ref(), &[], &[]).unwrap();
+    assert_eq!(vm.execute_program().unwrap(), 0xc);
 }
 
 #[test]
@@ -1535,8 +1514,8 @@ fn test_vm_mul32_reg() {
     )
     .unwrap();
     let executable = EbpfVm::<UserError>::create_executable_from_text_bytes(&prog, None).unwrap();
-    let mut vm = EbpfVm::<UserError>::new(executable.as_ref()).unwrap();
-    assert_eq!(vm.execute_program(&[], &[], &[]).unwrap(), 0xc);
+    let mut vm = EbpfVm::<UserError>::new(executable.as_ref(), &[], &[]).unwrap();
+    assert_eq!(vm.execute_program().unwrap(), 0xc);
 }
 
 #[test]
@@ -1550,8 +1529,8 @@ fn test_vm_mul32_reg_overflow() {
     )
     .unwrap();
     let executable = EbpfVm::<UserError>::create_executable_from_text_bytes(&prog, None).unwrap();
-    let mut vm = EbpfVm::<UserError>::new(executable.as_ref()).unwrap();
-    assert_eq!(vm.execute_program(&[], &[], &[]).unwrap(), 0x4);
+    let mut vm = EbpfVm::<UserError>::new(executable.as_ref(), &[], &[]).unwrap();
+    assert_eq!(vm.execute_program().unwrap(), 0x4);
 }
 
 #[test]
@@ -1564,8 +1543,8 @@ fn test_vm_mul64_imm() {
     )
     .unwrap();
     let executable = EbpfVm::<UserError>::create_executable_from_text_bytes(&prog, None).unwrap();
-    let mut vm = EbpfVm::<UserError>::new(executable.as_ref()).unwrap();
-    assert_eq!(vm.execute_program(&[], &[], &[]).unwrap(), 0x100000004);
+    let mut vm = EbpfVm::<UserError>::new(executable.as_ref(), &[], &[]).unwrap();
+    assert_eq!(vm.execute_program().unwrap(), 0x100000004);
 }
 
 #[test]
@@ -1579,8 +1558,8 @@ fn test_vm_mul64_reg() {
     )
     .unwrap();
     let executable = EbpfVm::<UserError>::create_executable_from_text_bytes(&prog, None).unwrap();
-    let mut vm = EbpfVm::<UserError>::new(executable.as_ref()).unwrap();
-    assert_eq!(vm.execute_program(&[], &[], &[]).unwrap(), 0x100000004);
+    let mut vm = EbpfVm::<UserError>::new(executable.as_ref(), &[], &[]).unwrap();
+    assert_eq!(vm.execute_program().unwrap(), 0x100000004);
 }
 
 #[test]
@@ -1600,8 +1579,8 @@ fn test_vm_mul_loop() {
     )
     .unwrap();
     let executable = EbpfVm::<UserError>::create_executable_from_text_bytes(&prog, None).unwrap();
-    let mut vm = EbpfVm::<UserError>::new(executable.as_ref()).unwrap();
-    assert_eq!(vm.execute_program(&[], &[], &[]).unwrap(), 0x75db9c97);
+    let mut vm = EbpfVm::<UserError>::new(executable.as_ref(), &[], &[]).unwrap();
+    assert_eq!(vm.execute_program().unwrap(), 0x75db9c97);
 }
 
 #[test]
@@ -1614,11 +1593,8 @@ fn test_vm_neg64() {
     )
     .unwrap();
     let executable = EbpfVm::<UserError>::create_executable_from_text_bytes(&prog, None).unwrap();
-    let mut vm = EbpfVm::<UserError>::new(executable.as_ref()).unwrap();
-    assert_eq!(
-        vm.execute_program(&[], &[], &[]).unwrap(),
-        0xfffffffffffffffe
-    );
+    let mut vm = EbpfVm::<UserError>::new(executable.as_ref(), &[], &[]).unwrap();
+    assert_eq!(vm.execute_program().unwrap(), 0xfffffffffffffffe);
 }
 
 #[test]
@@ -1631,8 +1607,8 @@ fn test_vm_neg() {
     )
     .unwrap();
     let executable = EbpfVm::<UserError>::create_executable_from_text_bytes(&prog, None).unwrap();
-    let mut vm = EbpfVm::<UserError>::new(executable.as_ref()).unwrap();
-    assert_eq!(vm.execute_program(&[], &[], &[]).unwrap(), 0xfffffffe);
+    let mut vm = EbpfVm::<UserError>::new(executable.as_ref(), &[], &[]).unwrap();
+    assert_eq!(vm.execute_program().unwrap(), 0xfffffffe);
 }
 
 #[test]
@@ -1658,8 +1634,8 @@ fn test_vm_prime() {
     )
     .unwrap();
     let executable = EbpfVm::<UserError>::create_executable_from_text_bytes(&prog, None).unwrap();
-    let mut vm = EbpfVm::<UserError>::new(executable.as_ref()).unwrap();
-    assert_eq!(vm.execute_program(&[], &[], &[]).unwrap(), 0x1);
+    let mut vm = EbpfVm::<UserError>::new(executable.as_ref(), &[], &[]).unwrap();
+    assert_eq!(vm.execute_program().unwrap(), 0x1);
 }
 
 #[test]
@@ -1673,8 +1649,8 @@ fn test_vm_rhs32() {
     )
     .unwrap();
     let executable = EbpfVm::<UserError>::create_executable_from_text_bytes(&prog, None).unwrap();
-    let mut vm = EbpfVm::<UserError>::new(executable.as_ref()).unwrap();
-    assert_eq!(vm.execute_program(&[], &[], &[]).unwrap(), 0x00ffffff);
+    let mut vm = EbpfVm::<UserError>::new(executable.as_ref(), &[], &[]).unwrap();
+    assert_eq!(vm.execute_program().unwrap(), 0x00ffffff);
 }
 
 #[test]
@@ -1688,8 +1664,8 @@ fn test_vm_rsh_reg() {
     )
     .unwrap();
     let executable = EbpfVm::<UserError>::create_executable_from_text_bytes(&prog, None).unwrap();
-    let mut vm = EbpfVm::<UserError>::new(executable.as_ref()).unwrap();
-    assert_eq!(vm.execute_program(&[], &[], &[]).unwrap(), 0x1);
+    let mut vm = EbpfVm::<UserError>::new(executable.as_ref(), &[], &[]).unwrap();
+    assert_eq!(vm.execute_program().unwrap(), 0x1);
 }
 
 #[test]
@@ -1708,8 +1684,8 @@ fn test_vm_stack1() {
     )
     .unwrap();
     let executable = EbpfVm::<UserError>::create_executable_from_text_bytes(&prog, None).unwrap();
-    let mut vm = EbpfVm::<UserError>::new(executable.as_ref()).unwrap();
-    assert_eq!(vm.execute_program(&[], &[], &[]).unwrap(), 0xcd);
+    let mut vm = EbpfVm::<UserError>::new(executable.as_ref(), &[], &[]).unwrap();
+    assert_eq!(vm.execute_program().unwrap(), 0xcd);
 }
 
 #[test]
@@ -1735,10 +1711,10 @@ fn test_vm_stack2() {
     )
     .unwrap();
     let executable = EbpfVm::<UserError>::create_executable_from_text_bytes(&prog, None).unwrap();
-    let mut vm = EbpfVm::<UserError>::new(executable.as_ref()).unwrap();
+    let mut vm = EbpfVm::<UserError>::new(executable.as_ref(), &[], &[]).unwrap();
     vm.register_syscall(0, syscalls::gather_bytes).unwrap();
     vm.register_syscall(1, syscalls::memfrob).unwrap();
-    assert_eq!(vm.execute_program(&[], &[], &[]).unwrap(), 0x01020304);
+    assert_eq!(vm.execute_program().unwrap(), 0x01020304);
 }
 
 #[test]
@@ -1752,8 +1728,8 @@ fn test_vm_stb() {
     .unwrap();
     let mem = &mut [0xaa, 0xbb, 0xff, 0xcc, 0xdd];
     let executable = EbpfVm::<UserError>::create_executable_from_text_bytes(&prog, None).unwrap();
-    let mut vm = EbpfVm::<UserError>::new(executable.as_ref()).unwrap();
-    assert_eq!(vm.execute_program(mem, &[], &[]).unwrap(), 0x11);
+    let mut vm = EbpfVm::<UserError>::new(executable.as_ref(), mem, &[]).unwrap();
+    assert_eq!(vm.execute_program().unwrap(), 0x11);
 }
 
 #[test]
@@ -1770,8 +1746,8 @@ fn test_vm_stdw() {
         0xff, 0xff, 0xcc, 0xdd, //
     ];
     let executable = EbpfVm::<UserError>::create_executable_from_text_bytes(&prog, None).unwrap();
-    let mut vm = EbpfVm::<UserError>::new(executable.as_ref()).unwrap();
-    assert_eq!(vm.execute_program(mem, &[], &[]).unwrap(), 0x44332211);
+    let mut vm = EbpfVm::<UserError>::new(executable.as_ref(), mem, &[]).unwrap();
+    assert_eq!(vm.execute_program().unwrap(), 0x44332211);
 }
 
 #[test]
@@ -1787,8 +1763,8 @@ fn test_vm_sth() {
         0xaa, 0xbb, 0xff, 0xff, 0xcc, 0xdd, //
     ];
     let executable = EbpfVm::<UserError>::create_executable_from_text_bytes(&prog, None).unwrap();
-    let mut vm = EbpfVm::<UserError>::new(executable.as_ref()).unwrap();
-    assert_eq!(vm.execute_program(mem, &[], &[]).unwrap(), 0x2211);
+    let mut vm = EbpfVm::<UserError>::new(executable.as_ref(), mem, &[]).unwrap();
+    assert_eq!(vm.execute_program().unwrap(), 0x2211);
 }
 
 #[test]
@@ -1826,9 +1802,9 @@ fn test_vm_string_stack() {
     )
     .unwrap();
     let executable = EbpfVm::<UserError>::create_executable_from_text_bytes(&prog, None).unwrap();
-    let mut vm = EbpfVm::<UserError>::new(executable.as_ref()).unwrap();
+    let mut vm = EbpfVm::<UserError>::new(executable.as_ref(), &[], &[]).unwrap();
     vm.register_syscall(4, syscalls::strcmp).unwrap();
-    assert_eq!(vm.execute_program(&[], &[], &[]).unwrap(), 0x0);
+    assert_eq!(vm.execute_program().unwrap(), 0x0);
 }
 
 #[test]
@@ -1844,8 +1820,8 @@ fn test_vm_stw() {
         0xaa, 0xbb, 0xff, 0xff, 0xff, 0xff, 0xcc, 0xdd, //
     ];
     let executable = EbpfVm::<UserError>::create_executable_from_text_bytes(&prog, None).unwrap();
-    let mut vm = EbpfVm::<UserError>::new(executable.as_ref()).unwrap();
-    assert_eq!(vm.execute_program(mem, &[], &[]).unwrap(), 0x44332211);
+    let mut vm = EbpfVm::<UserError>::new(executable.as_ref(), mem, &[]).unwrap();
+    assert_eq!(vm.execute_program().unwrap(), 0x44332211);
 }
 
 #[test]
@@ -1862,8 +1838,8 @@ fn test_vm_stxb() {
         0xaa, 0xbb, 0xff, 0xcc, 0xdd, //
     ];
     let executable = EbpfVm::<UserError>::create_executable_from_text_bytes(&prog, None).unwrap();
-    let mut vm = EbpfVm::<UserError>::new(executable.as_ref()).unwrap();
-    assert_eq!(vm.execute_program(mem, &[], &[]).unwrap(), 0x11);
+    let mut vm = EbpfVm::<UserError>::new(executable.as_ref(), mem, &[]).unwrap();
+    assert_eq!(vm.execute_program().unwrap(), 0x11);
 }
 
 #[test]
@@ -1895,11 +1871,8 @@ fn test_vm_stxb_all() {
         0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, //
     ];
     let executable = EbpfVm::<UserError>::create_executable_from_text_bytes(&prog, None).unwrap();
-    let mut vm = EbpfVm::<UserError>::new(executable.as_ref()).unwrap();
-    assert_eq!(
-        vm.execute_program(mem, &[], &[]).unwrap(),
-        0xf0f2f3f4f5f6f7f8
-    );
+    let mut vm = EbpfVm::<UserError>::new(executable.as_ref(), mem, &[]).unwrap();
+    assert_eq!(vm.execute_program().unwrap(), 0xf0f2f3f4f5f6f7f8);
 }
 
 #[test]
@@ -1918,8 +1891,8 @@ fn test_vm_stxb_all2() {
     .unwrap();
     let mem = &mut [0xff, 0xff];
     let executable = EbpfVm::<UserError>::create_executable_from_text_bytes(&prog, None).unwrap();
-    let mut vm = EbpfVm::<UserError>::new(executable.as_ref()).unwrap();
-    assert_eq!(vm.execute_program(mem, &[], &[]).unwrap(), 0xf1f9);
+    let mut vm = EbpfVm::<UserError>::new(executable.as_ref(), mem, &[]).unwrap();
+    assert_eq!(vm.execute_program().unwrap(), 0xf1f9);
 }
 
 #[test]
@@ -1954,8 +1927,8 @@ fn test_vm_stxb_chain() {
         0x00, 0x00, //
     ];
     let executable = EbpfVm::<UserError>::create_executable_from_text_bytes(&prog, None).unwrap();
-    let mut vm = EbpfVm::<UserError>::new(executable.as_ref()).unwrap();
-    assert_eq!(vm.execute_program(mem, &[], &[]).unwrap(), 0x2a);
+    let mut vm = EbpfVm::<UserError>::new(executable.as_ref(), mem, &[]).unwrap();
+    assert_eq!(vm.execute_program().unwrap(), 0x2a);
 }
 
 #[test]
@@ -1975,11 +1948,8 @@ fn test_vm_stxdw() {
         0xff, 0xff, 0xcc, 0xdd, //
     ];
     let executable = EbpfVm::<UserError>::create_executable_from_text_bytes(&prog, None).unwrap();
-    let mut vm = EbpfVm::<UserError>::new(executable.as_ref()).unwrap();
-    assert_eq!(
-        vm.execute_program(mem, &[], &[]).unwrap(),
-        0x8877665544332211
-    );
+    let mut vm = EbpfVm::<UserError>::new(executable.as_ref(), mem, &[]).unwrap();
+    assert_eq!(vm.execute_program().unwrap(), 0x8877665544332211);
 }
 
 #[test]
@@ -1996,8 +1966,8 @@ fn test_vm_stxh() {
         0xaa, 0xbb, 0xff, 0xff, 0xcc, 0xdd, //
     ];
     let executable = EbpfVm::<UserError>::create_executable_from_text_bytes(&prog, None).unwrap();
-    let mut vm = EbpfVm::<UserError>::new(executable.as_ref()).unwrap();
-    assert_eq!(vm.execute_program(mem, &[], &[]).unwrap(), 0x2211);
+    let mut vm = EbpfVm::<UserError>::new(executable.as_ref(), mem, &[]).unwrap();
+    assert_eq!(vm.execute_program().unwrap(), 0x2211);
 }
 
 #[test]
@@ -2014,8 +1984,8 @@ fn test_vm_stxw() {
         0xaa, 0xbb, 0xff, 0xff, 0xff, 0xff, 0xcc, 0xdd, //
     ];
     let executable = EbpfVm::<UserError>::create_executable_from_text_bytes(&prog, None).unwrap();
-    let mut vm = EbpfVm::<UserError>::new(executable.as_ref()).unwrap();
-    assert_eq!(vm.execute_program(mem, &[], &[]).unwrap(), 0x44332211);
+    let mut vm = EbpfVm::<UserError>::new(executable.as_ref(), mem, &[]).unwrap();
+    assert_eq!(vm.execute_program().unwrap(), 0x44332211);
 }
 
 #[test]
@@ -2051,8 +2021,8 @@ fn test_vm_subnet() {
         0x03, 0x00, //
     ];
     let executable = EbpfVm::<UserError>::create_executable_from_text_bytes(&prog, None).unwrap();
-    let mut vm = EbpfVm::<UserError>::new(executable.as_ref()).unwrap();
-    assert_eq!(vm.execute_program(mem, &[], &[]).unwrap(), 0x1);
+    let mut vm = EbpfVm::<UserError>::new(executable.as_ref(), mem, &[]).unwrap();
+    assert_eq!(vm.execute_program().unwrap(), 0x1);
 }
 
 const PROG_TCP_PORT_80: [u8; 152] = [
@@ -2096,8 +2066,8 @@ fn test_vm_tcp_port80_match() {
     ];
     let prog = &PROG_TCP_PORT_80;
     let executable = EbpfVm::<UserError>::create_executable_from_text_bytes(prog, None).unwrap();
-    let mut vm = EbpfVm::<UserError>::new(executable.as_ref()).unwrap();
-    assert_eq!(vm.execute_program(mem, &[], &[]).unwrap(), 0x1);
+    let mut vm = EbpfVm::<UserError>::new(executable.as_ref(), mem, &[]).unwrap();
+    assert_eq!(vm.execute_program().unwrap(), 0x1);
 }
 
 #[test]
@@ -2119,8 +2089,8 @@ fn test_vm_tcp_port80_nomatch() {
     ];
     let prog = &PROG_TCP_PORT_80;
     let executable = EbpfVm::<UserError>::create_executable_from_text_bytes(prog, None).unwrap();
-    let mut vm = EbpfVm::<UserError>::new(executable.as_ref()).unwrap();
-    assert_eq!(vm.execute_program(mem, &[], &[]).unwrap(), 0x0);
+    let mut vm = EbpfVm::<UserError>::new(executable.as_ref(), mem, &[]).unwrap();
+    assert_eq!(vm.execute_program().unwrap(), 0x0);
 }
 
 #[test]
@@ -2142,8 +2112,8 @@ fn test_vm_tcp_port80_nomatch_ethertype() {
     ];
     let prog = &PROG_TCP_PORT_80;
     let executable = EbpfVm::<UserError>::create_executable_from_text_bytes(prog, None).unwrap();
-    let mut vm = EbpfVm::<UserError>::new(executable.as_ref()).unwrap();
-    assert_eq!(vm.execute_program(mem, &[], &[]).unwrap(), 0x0);
+    let mut vm = EbpfVm::<UserError>::new(executable.as_ref(), mem, &[]).unwrap();
+    assert_eq!(vm.execute_program().unwrap(), 0x0);
 }
 
 #[test]
@@ -2165,8 +2135,8 @@ fn test_vm_tcp_port80_nomatch_proto() {
     ];
     let prog = &PROG_TCP_PORT_80;
     let executable = EbpfVm::<UserError>::create_executable_from_text_bytes(prog, None).unwrap();
-    let mut vm = EbpfVm::<UserError>::new(executable.as_ref()).unwrap();
-    assert_eq!(vm.execute_program(mem, &[], &[]).unwrap(), 0x0);
+    let mut vm = EbpfVm::<UserError>::new(executable.as_ref(), mem, &[]).unwrap();
+    assert_eq!(vm.execute_program().unwrap(), 0x0);
 }
 
 #[test]
@@ -2174,11 +2144,8 @@ fn test_vm_tcp_sack_match() {
     let mut mem = TCP_SACK_MATCH.to_vec();
     let prog = assemble(TCP_SACK_ASM).unwrap();
     let executable = EbpfVm::<UserError>::create_executable_from_text_bytes(&prog, None).unwrap();
-    let mut vm = EbpfVm::<UserError>::new(executable.as_ref()).unwrap();
-    assert_eq!(
-        vm.execute_program(mem.as_mut_slice(), &[], &[]).unwrap(),
-        0x1
-    );
+    let mut vm = EbpfVm::<UserError>::new(executable.as_ref(), mem.as_mut_slice(), &[]).unwrap();
+    assert_eq!(vm.execute_program().unwrap(), 0x1);
 }
 
 #[test]
@@ -2186,9 +2153,6 @@ fn test_vm_tcp_sack_nomatch() {
     let mut mem = TCP_SACK_NOMATCH.to_vec();
     let prog = assemble(TCP_SACK_ASM).unwrap();
     let executable = EbpfVm::<UserError>::create_executable_from_text_bytes(&prog, None).unwrap();
-    let mut vm = EbpfVm::<UserError>::new(executable.as_ref()).unwrap();
-    assert_eq!(
-        vm.execute_program(mem.as_mut_slice(), &[], &[]).unwrap(),
-        0x0
-    );
+    let mut vm = EbpfVm::<UserError>::new(executable.as_ref(), mem.as_mut_slice(), &[]).unwrap();
+    assert_eq!(vm.execute_program().unwrap(), 0x0);
 }

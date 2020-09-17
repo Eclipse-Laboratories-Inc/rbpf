@@ -22,7 +22,10 @@
 
 use std::u64;
 use time;
-use crate::{ebpf::{EbpfError, UserDefinedError}, memory_region::{MemoryRegion, translate_addr}};
+use crate::{
+    ebpf::{EbpfError, UserDefinedError},
+    memory_region::{MemoryRegion, MemoryMapping}
+};
 
 // Syscalls associated to kernel syscalls
 // See also linux/include/uapi/linux/bpf.h in Linux kernel sources.
@@ -60,7 +63,7 @@ pub fn bpf_time_getns<E: UserDefinedError> (
     _arg5: u64,
     _ro_regions: &[MemoryRegion],
     _rw_regions: &[MemoryRegion],
-) -> Result<u64, EbpfError<E>> 
+) -> Result<u64, EbpfError<E>>
 {
     Ok(time::precise_time_ns())
 }
@@ -187,17 +190,16 @@ pub fn gather_bytes<E: UserDefinedError> (
 /// assert_eq!(val, vec![0x00, 0x00, 0x00, 0x00, 0x00, 0x11, 0x22, 0x33]);
 /// ```
 pub fn memfrob<E: UserDefinedError> (
-    addr: u64,
-    len: u64, 
+    vm_addr: u64,
+    len: u64,
     _arg3: u64,
     _arg4: u64,
     _arg5: u64,
-    _ro_regions: &[MemoryRegion],
-    rw_regions: &[MemoryRegion]
+    memory_mapping: &[MemoryRegion]
 ) -> Result<u64, EbpfError<E>>
 {
 
-        let host_addr = translate_addr(addr, len as usize, "Store", 0, rw_regions)?;
+        let host_addr = memory_mapping.map(AccessType::Store, vm_addr, len as usize)?;
         for i in 0..len {
             unsafe {
                 let mut p = (host_addr + i) as *mut u8;
@@ -282,16 +284,15 @@ pub fn strcmp<E: UserDefinedError> (
     _arg3: u64,
     _arg4: u64,
     _arg5: u64,
-    ro_regions: &[MemoryRegion],
-    _rw_regions: &[MemoryRegion]
+    memory_mapping: &[MemoryRegion]
 ) -> Result<u64, EbpfError<E>>
 {
         // C-like strcmp, maybe shorter than converting the bytes to string and comparing?
         if arg1 == 0 || arg2 == 0 {
             return Ok(u64::MAX);
         }
-        let mut a = translate_addr(arg1, 1, "Load", 0, ro_regions)?;
-        let mut b = translate_addr(arg2, 1, "Load", 0, ro_regions)?;
+        let mut a = memory_mapping.map(AccessType::Load, arg1, 1)?;
+        let mut b = memory_mapping.map(AccessType::Load, arg2, 1)?;
         unsafe {
             let mut a_val = *(a as *const u8);
             let mut b_val = *(b as *const u8);

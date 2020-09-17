@@ -16,10 +16,34 @@ use crate::{
     elf::EBpfElf,
     error::{EbpfError, UserDefinedError},
     jit,
-    memory_region::{translate_addr, MemoryRegion},
+    memory_region::{AccessType, MemoryMapping, MemoryRegion},
+    user_error::UserError,
 };
 use log::{debug, log_enabled, trace};
 use std::{collections::HashMap, u32};
+
+/// Translates a vm_addr into a host_addr and sets the pc in the error if one occurs
+macro_rules! translate_memory_access {
+    ( $self:ident, $vm_addr:ident, $access_type:expr, $pc:ident, $T:ty ) => {
+        match $self.memory_mapping.map::<UserError>(
+            $access_type,
+            $vm_addr,
+            std::mem::size_of::<$T>() as u64,
+        ) {
+            Ok(host_addr) => host_addr as *mut $T,
+            Err(EbpfError::AccessViolation(_pc, access_type, vm_addr, len, regions)) => {
+                return Err(EbpfError::AccessViolation(
+                    $pc + ebpf::ELF_INSN_DUMP_OFFSET,
+                    access_type,
+                    vm_addr,
+                    len,
+                    regions,
+                ));
+            }
+            _ => unreachable!(),
+        }
+    };
+}
 
 /// eBPF verification function that returns an error if the program does not meet its requirements.
 ///
@@ -32,26 +56,17 @@ use std::{collections::HashMap, u32};
 pub type Verifier<E> = fn(prog: &[u8]) -> Result<(), E>;
 
 /// eBPF Jit-compiled program.
-pub type JitProgram<E> = unsafe fn(*mut u8, usize) -> Result<u64, EbpfError<E>>;
+pub type JitProgram<E> = unsafe fn(u64, &MemoryMapping) -> Result<u64, EbpfError<E>>;
 
 /// Syscall function without context.
 pub type SyscallFunction<E> =
-    fn(u64, u64, u64, u64, u64, &[MemoryRegion], &[MemoryRegion]) -> Result<u64, EbpfError<E>>;
+    fn(u64, u64, u64, u64, u64, &MemoryMapping) -> Result<u64, EbpfError<E>>;
 
 /// Syscall with context
 pub trait SyscallObject<E: UserDefinedError> {
     /// Call the syscall function
     #[allow(clippy::too_many_arguments)]
-    fn call(
-        &mut self,
-        u64,
-        u64,
-        u64,
-        u64,
-        u64,
-        &[MemoryRegion],
-        &[MemoryRegion],
-    ) -> Result<u64, EbpfError<E>>;
+    fn call(&mut self, u64, u64, u64, u64, u64, &MemoryMapping) -> Result<u64, EbpfError<E>>;
 }
 
 /// Contains the syscall
@@ -107,16 +122,20 @@ impl InstructionMeter for DefaultInstructionMeter {
 ///
 /// // Instantiate a VM.
 /// let executable = EbpfVm::<UserError>::create_executable_from_text_bytes(prog, None).unwrap();
-/// let mut vm = EbpfVm::<UserError>::new(executable.as_ref()).unwrap();
+/// let mut vm = EbpfVm::<UserError>::new(executable.as_ref(), mem, &[]).unwrap();
 ///
 /// // Provide a reference to the packet data.
-/// let res = vm.execute_program(mem, &[], &[]).unwrap();
+/// let res = vm.execute_program().unwrap();
 /// assert_eq!(res, 0);
 /// ```
 pub struct EbpfVm<'a, E: UserDefinedError> {
     executable: &'a dyn Executable<E>,
-    jit: Option<JitProgram<E>>,
+    compiled_prog: Option<JitProgram<E>>,
     syscalls: HashMap<u32, Syscall<'a, E>>,
+    prog: &'a [u8],
+    prog_addr: u64,
+    frames: CallFrames,
+    memory_mapping: MemoryMapping,
     last_insn_count: u64,
     total_insn_count: u64,
 }
@@ -136,13 +155,45 @@ impl<'a, E: UserDefinedError> EbpfVm<'a, E> {
     ///
     /// // Instantiate a VM.
     /// let executable = EbpfVm::<UserError>::create_executable_from_text_bytes(prog, None).unwrap();
-    /// let mut vm = EbpfVm::<UserError>::new(executable.as_ref()).unwrap();
+    /// let mut vm = EbpfVm::<UserError>::new(executable.as_ref(), &[], &[]).unwrap();
     /// ```
-    pub fn new(executable: &'a dyn Executable<E>) -> Result<EbpfVm<'a, E>, EbpfError<E>> {
+    pub fn new(
+        executable: &'a dyn Executable<E>,
+        mem: &[u8],
+        granted_regions: &[MemoryRegion],
+    ) -> Result<EbpfVm<'a, E>, EbpfError<E>> {
+        let frames = CallFrames::default();
+        let stack_regions = frames.get_stacks();
+        let const_data_regions: Vec<MemoryRegion> =
+            if let Ok(sections) = executable.get_ro_sections() {
+                sections
+                    .iter()
+                    .map(|(addr, slice)| MemoryRegion::new_from_slice(slice, *addr, false))
+                    .collect()
+            } else {
+                Vec::new()
+            };
+        let mut regions: Vec<MemoryRegion> = Vec::with_capacity(
+            granted_regions.len() + stack_regions.len() + const_data_regions.len() + 2,
+        );
+        regions.extend(granted_regions.iter().cloned());
+        regions.extend(stack_regions.iter().cloned());
+        regions.extend(const_data_regions);
+        regions.push(MemoryRegion::new_from_slice(
+            &mem,
+            ebpf::MM_INPUT_START,
+            true,
+        ));
+        let (prog_addr, prog) = executable.get_text_bytes()?;
+        regions.push(MemoryRegion::new_from_slice(prog, prog_addr, false));
         Ok(EbpfVm {
             executable,
-            jit: None,
+            compiled_prog: None,
             syscalls: HashMap::new(),
+            prog,
+            prog_addr,
+            frames,
+            memory_mapping: MemoryMapping::new_from_regions(regions),
             last_insn_count: 0,
             total_insn_count: 0,
         })
@@ -206,7 +257,7 @@ impl<'a, E: UserDefinedError> EbpfVm<'a, E> {
     ///
     /// // Instantiate a VM.
     /// let executable = EbpfVm::<UserError>::create_executable_from_text_bytes(prog, None).unwrap();
-    /// let mut vm = EbpfVm::<UserError>::new(executable.as_ref()).unwrap();
+    /// let mut vm = EbpfVm::<UserError>::new(executable.as_ref(), &[], &[]).unwrap();
     ///
     /// // Register a syscall.
     /// // On running the program this syscall will print the content of registers r3, r4 and r5 to
@@ -276,40 +327,22 @@ impl<'a, E: UserDefinedError> EbpfVm<'a, E> {
     ///
     /// // Instantiate a VM.
     /// let executable = EbpfVm::<UserError>::create_executable_from_text_bytes(prog, None).unwrap();
-    /// let mut vm = EbpfVm::<UserError>::new(executable.as_ref()).unwrap();
+    /// let mut vm = EbpfVm::<UserError>::new(executable.as_ref(), mem, &[]).unwrap();
     ///
     /// // Provide a reference to the packet data.
-    /// let res = vm.execute_program(mem, &[], &[]).unwrap();
+    /// let res = vm.execute_program().unwrap();
     /// assert_eq!(res, 0);
     /// ```
-    pub fn execute_program(
-        &mut self,
-        mem: &[u8],
-        granted_ro_regions: &[MemoryRegion],
-        granted_rw_regions: &[MemoryRegion],
-    ) -> Result<u64, EbpfError<E>> {
-        self.execute_program_metered(
-            mem,
-            granted_ro_regions,
-            granted_rw_regions,
-            DefaultInstructionMeter {},
-        )
+    pub fn execute_program(&mut self) -> Result<u64, EbpfError<E>> {
+        self.execute_program_metered(DefaultInstructionMeter {})
     }
 
-    /// Execute the program loaded, with the given packet data and instruction meter.
+    /// Execute the program loaded, with the given instruction meter.
     pub fn execute_program_metered<I: InstructionMeter>(
         &mut self,
-        mem: &[u8],
-        granted_ro_regions: &[MemoryRegion],
-        granted_rw_regions: &[MemoryRegion],
         mut instruction_meter: I,
     ) -> Result<u64, EbpfError<E>> {
-        let result = self.execute_program_inner(
-            mem,
-            granted_ro_regions,
-            granted_rw_regions,
-            &mut instruction_meter,
-        );
+        let result = self.execute_program_inner(&mut instruction_meter);
         instruction_meter.consume(self.last_insn_count);
         result
     }
@@ -317,66 +350,30 @@ impl<'a, E: UserDefinedError> EbpfVm<'a, E> {
     #[rustfmt::skip]
     fn execute_program_inner<I: InstructionMeter>(
         &mut self,
-        mem: &[u8],
-        granted_ro_regions: &[MemoryRegion],
-        granted_rw_regions: &[MemoryRegion],
         instruction_meter: &mut I,
     ) -> Result<u64, EbpfError<E>> {
         const U32MAX: u64 = u32::MAX as u64;
 
-        let mut frames = CallFrames::default();
-        let mut ro_regions = Vec::new();
-        let mut rw_regions = Vec::new();
-        ro_regions.extend_from_slice(granted_ro_regions);
-        ro_regions.extend_from_slice(granted_rw_regions);
-        rw_regions.extend_from_slice(granted_rw_regions);
-        for ptr in frames.get_stacks() {
-            ro_regions.push(ptr.clone());
-            rw_regions.push(ptr.clone());
-        }
-
-        ro_regions.push(MemoryRegion::new_from_slice(&mem, ebpf::MM_INPUT_START));
-        rw_regions.push(MemoryRegion::new_from_slice(&mem, ebpf::MM_INPUT_START));
-
-        if let Ok(sections) = self.executable.get_ro_sections() {
-            let regions: Vec<_> = sections
-                .iter()
-                .map(|(addr, slice)| MemoryRegion::new_from_slice(slice, *addr))
-                .collect();
-            ro_regions.extend(regions);
-        };
-        let entry = self.executable.get_entrypoint_instruction_offset()?;
-        let (prog_addr, prog) = self.executable.get_text_bytes()?;
-        ro_regions.push(MemoryRegion::new_from_slice(prog, prog_addr));
-
-        // Sort regions by addr_vm for binary search
-        ro_regions.sort_by(|a, b| a.addr_vm.cmp(&b.addr_vm));
-        rw_regions.sort_by(|a, b| a.addr_vm.cmp(&b.addr_vm));
-
         // R1 points to beginning of input memory, R10 to the stack of the first frame
-        let mut reg: [u64; 11] = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, frames.get_stack_top()];
+        let mut reg: [u64; 11] = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, self.frames.get_stack_top()];
 
-        if !mem.is_empty() {
+        if self.memory_mapping.map::<UserError>(AccessType::Store, ebpf::MM_INPUT_START, 1).is_ok() {
             reg[1] = ebpf::MM_INPUT_START;
         }
-
-        let translate_load_addr =
-            |addr: u64, len: usize, pc: usize| translate_addr(addr, len, "load", pc, &ro_regions);
-        let translate_store_addr =
-            |addr: u64, len: usize, pc: usize| translate_addr(addr, len, "store", pc, &rw_regions);
 
         // Check trace logging outside the instruction loop, saves ~30%
         let insn_trace = log_enabled!(log::Level::Trace);
 
         // Loop on instructions
+        let entry = self.executable.get_entrypoint_instruction_offset()?;
         let mut next_pc: usize = entry;
         let mut remaining_insn_count = instruction_meter.get_remaining();
         self.last_insn_count = 0;
         self.total_insn_count = 0;
-        while next_pc * ebpf::INSN_SIZE + ebpf::INSN_SIZE <= prog.len() {
+        while next_pc * ebpf::INSN_SIZE + ebpf::INSN_SIZE <= self.prog.len() {
             let pc = next_pc;
             next_pc += 1;
-            let insn = ebpf::get_insn_unchecked(prog, pc);
+            let insn = ebpf::get_insn_unchecked(self.prog, pc);
             let dst = insn.dst as usize;
             let src = insn.src as usize;
             self.last_insn_count += 1;
@@ -387,9 +384,9 @@ impl<'a, E: UserDefinedError> EbpfVm<'a, E> {
                     "    BPF: {:5?} {:016x?} frame {:?} pc {:4?} {}",
                     self.total_insn_count,
                     reg,
-                    frames.get_frame_index(),
+                    self.frames.get_frame_index(),
                     pc + ebpf::ELF_INSN_DUMP_OFFSET,
-                    disassembler::to_insn_vec(&prog[pc * ebpf::INSN_SIZE..])[0].desc
+                    disassembler::to_insn_vec(&self.prog[pc * ebpf::INSN_SIZE..])[0].desc
                 );
             }
 
@@ -400,47 +397,47 @@ impl<'a, E: UserDefinedError> EbpfVm<'a, E> {
                 // bother re-fetching it, just use ebpf::MM_INPUT_START already.
                 ebpf::LD_ABS_B   => {
                     let vm_addr = ebpf::MM_INPUT_START.saturating_add((insn.imm as u32) as u64);
-                    let host_ptr = translate_load_addr(vm_addr, 1, pc)? as *const u8;
+                    let host_ptr = translate_memory_access!(self, vm_addr, AccessType::Load, pc, u8);
                     reg[0] = unsafe { *host_ptr as u64 };
                 },
                 ebpf::LD_ABS_H   =>  {
                     let vm_addr = ebpf::MM_INPUT_START.saturating_add((insn.imm as u32) as u64);
-                    let host_ptr = translate_load_addr(vm_addr, 2, pc)? as *const u16;
+                    let host_ptr = translate_memory_access!(self, vm_addr, AccessType::Load, pc, u16);
                     reg[0] = unsafe { *host_ptr as u64 };
                 },
                 ebpf::LD_ABS_W   => {
                     let vm_addr = ebpf::MM_INPUT_START.saturating_add((insn.imm as u32) as u64);
-                    let host_ptr = translate_load_addr(vm_addr, 4, pc)? as *const u32;
+                    let host_ptr = translate_memory_access!(self, vm_addr, AccessType::Load, pc, u32);
                     reg[0] = unsafe { *host_ptr as u64 };
                 },
                 ebpf::LD_ABS_DW  => {
                     let vm_addr = ebpf::MM_INPUT_START.saturating_add((insn.imm as u32) as u64);
-                    let host_ptr = translate_load_addr(vm_addr, 8, pc)? as *const u64;
+                    let host_ptr = translate_memory_access!(self, vm_addr, AccessType::Load, pc, u64);
                     reg[0] = unsafe { *host_ptr as u64 };
                 },
                 ebpf::LD_IND_B   => {
                     let vm_addr = ebpf::MM_INPUT_START.saturating_add(reg[src]).saturating_add((insn.imm as u32) as u64);
-                    let host_ptr = translate_load_addr(vm_addr, 1, pc)? as *const u8;
+                    let host_ptr = translate_memory_access!(self, vm_addr, AccessType::Load, pc, u8);
                     reg[0] = unsafe { *host_ptr as u64 };
                 },
                 ebpf::LD_IND_H   => {
                     let vm_addr = ebpf::MM_INPUT_START.saturating_add(reg[src]).saturating_add((insn.imm as u32) as u64);
-                    let host_ptr = translate_load_addr(vm_addr, 2, pc)? as *const u16;
+                    let host_ptr = translate_memory_access!(self, vm_addr, AccessType::Load, pc, u16);
                     reg[0] = unsafe { *host_ptr as u64 };
                 },
                 ebpf::LD_IND_W   => {
                     let vm_addr = ebpf::MM_INPUT_START.saturating_add(reg[src]).saturating_add((insn.imm as u32) as u64);
-                    let host_ptr = translate_load_addr(vm_addr, 4, pc)? as *const u32;
+                    let host_ptr = translate_memory_access!(self, vm_addr, AccessType::Load, pc, u32);
                     reg[0] = unsafe { *host_ptr as u64 };
                 },
                 ebpf::LD_IND_DW  => {
                     let vm_addr = ebpf::MM_INPUT_START.saturating_add(reg[src]).saturating_add((insn.imm as u32) as u64);
-                    let host_ptr = translate_load_addr(vm_addr, 8, pc)? as *const u64;
+                    let host_ptr = translate_memory_access!(self, vm_addr, AccessType::Load, pc, u64);
                     reg[0] = unsafe { *host_ptr as u64 };
                 },
 
                 ebpf::LD_DW_IMM  => {
-                    let next_insn = ebpf::get_insn(prog, next_pc);
+                    let next_insn = ebpf::get_insn(self.prog, next_pc);
                     next_pc += 1;
                     reg[dst] = (insn.imm as u32) as u64 + ((next_insn.imm as u64) << 32);
                 },
@@ -448,66 +445,66 @@ impl<'a, E: UserDefinedError> EbpfVm<'a, E> {
                 // BPF_LDX class
                 ebpf::LD_B_REG   => {
                     let vm_addr = (reg[src] as i64).saturating_add(insn.off as i64) as u64;
-                    let host_ptr = translate_load_addr(vm_addr, 1, pc)? as *const u8;
+                    let host_ptr = translate_memory_access!(self, vm_addr, AccessType::Load, pc, u8);
                     reg[dst] = unsafe { *host_ptr as u64 };
                 },
                 ebpf::LD_H_REG   => {
                     let vm_addr = (reg[src] as i64).saturating_add(insn.off as i64) as u64;
-                    let host_ptr = translate_load_addr(vm_addr, 2, pc)? as *const u16;
+                    let host_ptr = translate_memory_access!(self, vm_addr, AccessType::Load, pc, u16);
                     reg[dst] = unsafe { *host_ptr as u64 };
                 },
                 ebpf::LD_W_REG   => {
                     let vm_addr = (reg[src] as i64).saturating_add(insn.off as i64) as u64;
-                    let host_ptr = translate_load_addr(vm_addr, 4, pc)? as *const u32;
+                    let host_ptr = translate_memory_access!(self, vm_addr, AccessType::Load, pc, u32);
                     reg[dst] = unsafe { *host_ptr as u64 };
                 },
                 ebpf::LD_DW_REG  => {
                     let vm_addr = (reg[src] as i64).saturating_add(insn.off as i64) as u64;
-                    let host_ptr = translate_load_addr(vm_addr, 8, pc)? as *const u64;
+                    let host_ptr = translate_memory_access!(self, vm_addr, AccessType::Load, pc, u64);
                     reg[dst] = unsafe { *host_ptr as u64 };
                 },
 
                 // BPF_ST class
                 ebpf::ST_B_IMM   => {
                     let vm_addr = (reg[dst] as i64).saturating_add( insn.off as i64) as u64;
-                    let host_ptr = translate_store_addr(vm_addr, 1, pc)? as *mut u8;
+                    let host_ptr = translate_memory_access!(self, vm_addr, AccessType::Store, pc, u8);
                     unsafe { *host_ptr = insn.imm as u8 };
                 },
                 ebpf::ST_H_IMM   => {
                     let vm_addr = (reg[dst] as i64).saturating_add(insn.off as i64) as u64;
-                    let host_ptr = translate_store_addr(vm_addr, 2, pc)? as *mut u16;
+                    let host_ptr = translate_memory_access!(self, vm_addr, AccessType::Store, pc, u16);
                     unsafe { *host_ptr = insn.imm as u16 };
                 },
                 ebpf::ST_W_IMM   => {
                     let vm_addr = (reg[dst] as i64).saturating_add(insn.off as i64) as u64;
-                    let host_ptr = translate_store_addr(vm_addr, 4, pc)? as *mut u32;
+                    let host_ptr = translate_memory_access!(self, vm_addr, AccessType::Store, pc, u32);
                     unsafe { *host_ptr = insn.imm as u32 };
                 },
                 ebpf::ST_DW_IMM  => {
                     let vm_addr = (reg[dst] as i64).saturating_add(insn.off as i64) as u64;
-                    let host_ptr = translate_store_addr(vm_addr, 8, pc)? as *mut u64;
+                    let host_ptr = translate_memory_access!(self, vm_addr, AccessType::Store, pc, u64);
                     unsafe { *host_ptr = insn.imm as u64 };
                 },
 
                 // BPF_STX class
                 ebpf::ST_B_REG   => {
                     let vm_addr = (reg[dst] as i64).saturating_add(insn.off as i64) as u64;
-                    let host_ptr = translate_store_addr(vm_addr, 1, pc)? as *mut u8;
+                    let host_ptr = translate_memory_access!(self, vm_addr, AccessType::Store, pc, u8);
                     unsafe { *host_ptr = reg[src] as u8 };
                 },
                 ebpf::ST_H_REG   => {
                     let vm_addr = (reg[dst] as i64).saturating_add(insn.off as i64) as u64;
-                    let host_ptr = translate_store_addr(vm_addr, 2, pc)? as *mut u16;
+                    let host_ptr = translate_memory_access!(self, vm_addr, AccessType::Store, pc, u16);
                     unsafe { *host_ptr = reg[src] as u16 };
                 },
                 ebpf::ST_W_REG   => {
                     let vm_addr = (reg[dst] as i64).saturating_add(insn.off as i64) as u64;
-                    let host_ptr = translate_store_addr(vm_addr, 4, pc)? as *mut u32;
+                    let host_ptr = translate_memory_access!(self, vm_addr, AccessType::Store, pc, u32);
                     unsafe { *host_ptr = reg[src] as u32 };
                 },
                 ebpf::ST_DW_REG  => {
                     let vm_addr = (reg[dst] as i64).saturating_add(insn.off as i64) as u64;
-                    let host_ptr = translate_store_addr(vm_addr, 8, pc)? as *mut u64;
+                    let host_ptr = translate_memory_access!(self, vm_addr, AccessType::Store, pc, u64);
                     unsafe { *host_ptr = reg[src] as u64 };
                 },
 
@@ -644,11 +641,11 @@ impl<'a, E: UserDefinedError> EbpfVm<'a, E> {
                 ebpf::CALL_REG   => {
                     let target_address = reg[insn.imm as usize];
                     reg[ebpf::STACK_REG] =
-                        frames.push(&reg[ebpf::FIRST_SCRATCH_REG..ebpf::FIRST_SCRATCH_REG + ebpf::SCRATCH_REGS], next_pc)?;
+                        self.frames.push(&reg[ebpf::FIRST_SCRATCH_REG..ebpf::FIRST_SCRATCH_REG + ebpf::SCRATCH_REGS], next_pc)?;
                     if target_address < ebpf::MM_PROGRAM_START {
                         return Err(EbpfError::CallOutsideTextSegment(pc + ebpf::ELF_INSN_DUMP_OFFSET, reg[insn.imm as usize]));
                     }
-                    next_pc = Self::check_pc(&prog, pc, (target_address - prog_addr) as usize / ebpf::INSN_SIZE)?;
+                    next_pc = Self::check_pc(&self.prog, pc, (target_address - self.prog_addr) as usize / ebpf::INSN_SIZE)?;
                 },
 
                 // Do not delegate the check to the verifier, since registered functions can be
@@ -664,8 +661,7 @@ impl<'a, E: UserDefinedError> EbpfVm<'a, E> {
                                 reg[3],
                                 reg[4],
                                 reg[5],
-                                &ro_regions,
-                                &rw_regions,
+                                &self.memory_mapping,
                             )?,
                             Syscall::Object(syscall) => syscall.call(
                                 reg[1],
@@ -673,39 +669,38 @@ impl<'a, E: UserDefinedError> EbpfVm<'a, E> {
                                 reg[3],
                                 reg[4],
                                 reg[5],
-                                &ro_regions,
-                                &rw_regions,
+                                &self.memory_mapping,
                             )?,
                         };
                         remaining_insn_count = instruction_meter.get_remaining();
                     } else if let Some(new_pc) = self.executable.lookup_bpf_call(insn.imm as u32) {
                         // make BPF to BPF call
-                        reg[ebpf::STACK_REG] = frames.push(
+                        reg[ebpf::STACK_REG] = self.frames.push(
                             &reg[ebpf::FIRST_SCRATCH_REG
                                 ..ebpf::FIRST_SCRATCH_REG + ebpf::SCRATCH_REGS],
                             next_pc,
                         )?;
-                        next_pc = Self::check_pc(&prog, pc, *new_pc)?;
+                        next_pc = Self::check_pc(&self.prog, pc, *new_pc)?;
                     } else {
                         self.executable.report_unresolved_symbol(pc)?;
                     }
                 }
 
                 ebpf::EXIT => {
-                    match frames.pop::<E>() {
+                    match self.frames.pop::<E>() {
                         Ok((saved_reg, stack_ptr, ptr)) => {
                             // Return from BPF to BPF call
                             reg[ebpf::FIRST_SCRATCH_REG
                                 ..ebpf::FIRST_SCRATCH_REG + ebpf::SCRATCH_REGS]
                                 .copy_from_slice(&saved_reg);
                             reg[ebpf::STACK_REG] = stack_ptr;
-                            next_pc = Self::check_pc(&prog, pc, ptr)?;
+                            next_pc = Self::check_pc(&self.prog, pc, ptr)?;
                         }
                         _ => {
                             debug!("BPF instructions executed: {:?}", self.total_insn_count);
                             debug!(
                                 "Max frame depth reached: {:?}",
-                                frames.get_max_frame_index()
+                                self.frames.get_max_frame_index()
                             );
                             return Ok(reg[0]);
                         }
@@ -749,40 +744,38 @@ impl<'a, E: UserDefinedError> EbpfVm<'a, E> {
     ///
     /// // Instantiate a VM.
     /// let executable = EbpfVm::<UserError>::create_executable_from_text_bytes(prog, None).unwrap();
-    /// let mut vm = EbpfVm::<UserError>::new(executable.as_ref()).unwrap();
+    /// let mut vm = EbpfVm::<UserError>::new(executable.as_ref(), &[], &[]).unwrap();
     ///
     /// # #[cfg(not(windows))]
     /// vm.jit_compile();
     /// ```
     pub fn jit_compile(&mut self) -> Result<(), EbpfError<E>> {
-        let (_, prog) = self.executable.get_text_bytes()?;
-        self.jit = Some(jit::compile(prog, &self.syscalls)?);
+        self.compiled_prog = Some(jit::compile(self.prog, &self.syscalls)?);
         Ok(())
     }
 
-    /// Execute the previously JIT-compiled program, with the given packet data
-    /// in a manner very similar to `execute_program(&[], &[])`.
+    /// Execute the previously JIT-compiled program, with the given packet data in a manner
+    /// very similar to `execute_program()`.
     ///
     /// # Safety
     ///
-    /// **WARNING:** JIT-compiled assembly code is not safe, in particular there is no runtime
-    /// check for memory access; so if the eBPF program attempts erroneous accesses, this may end
-    /// very bad (program may segfault). It may be wise to check that the program works with the
-    /// interpreter before running the JIT-compiled version of it.
+    /// **WARNING:** JIT-compiled assembly code is not safe. It may be wise to check that
+    /// the program works with the interpreter before running the JIT-compiled version of it.
     ///
     /// For this reason the function should be called from within an `unsafe` bloc.
     ///
-    pub unsafe fn execute_program_jit(&self, mem: &mut [u8]) -> Result<u64, EbpfError<E>> {
-        // If packet data is empty, do not send the address of an empty slice; send a null pointer
-        //  as first argument instead, as this is uBPF's behavior (empty packet should not happen
-        //  in the kernel; anyway the verifier would prevent the use of uninitialized registers).
-        //  See `mul_loop` test.
-        let mem_ptr = match mem.len() {
-            0 => std::ptr::null_mut(),
-            _ => mem.as_ptr() as *mut u8,
+    pub unsafe fn execute_program_jit(&self) -> Result<u64, EbpfError<E>> {
+        let reg1 = if self
+            .memory_mapping
+            .map::<UserError>(AccessType::Store, ebpf::MM_INPUT_START, 1)
+            .is_ok()
+        {
+            ebpf::MM_INPUT_START
+        } else {
+            0
         };
-        match self.jit {
-            Some(jit) => jit(mem_ptr, mem.len()),
+        match self.compiled_prog {
+            Some(compiled_prog) => compiled_prog(reg1, &self.memory_mapping),
             None => Err(EbpfError::JITNotCompiled),
         }
     }
