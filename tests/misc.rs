@@ -21,7 +21,6 @@ extern crate libc;
 extern crate solana_rbpf;
 extern crate thiserror;
 
-use byteorder::{ByteOrder, LittleEndian};
 use libc::c_char;
 use solana_rbpf::{
     assembler::assemble,
@@ -340,87 +339,10 @@ fn test_get_total_instruction_count_with_syscall_capped() {
 
     let executable = EbpfVm::<UserError>::create_executable_from_text_bytes(&prog, None).unwrap();
     let mut vm = EbpfVm::<UserError>::new(executable.as_ref(), &mem, &[]).unwrap();
-    vm.register_syscall(BPF_TRACE_PRINTK_IDX, Syscall::Function(bpf_trace_printf))
-        .unwrap();
     vm.register_syscall(0, Syscall::Function(bpf_syscall_string))
         .unwrap();
     let instruction_meter = TestInstructionMeter { remaining: 3 };
     vm.execute_program_metered(instruction_meter).unwrap();
-}
-
-#[test]
-fn test_symbol_relocation() {
-    let prog = assemble(
-        "
-        mov64 r1, r10
-        sub64 r1, 0x1
-        mov64 r2, 0x1
-        call 0
-        mov64 r0, 0x0
-        exit",
-    )
-    .unwrap();
-
-    let mem = [72, 101, 108, 108, 111];
-
-    let executable = EbpfVm::<UserError>::create_executable_from_text_bytes(&prog, None).unwrap();
-    let mut vm = EbpfVm::<UserError>::new(executable.as_ref(), &mem, &[]).unwrap();
-    vm.register_syscall(0, Syscall::Function(bpf_syscall_string))
-        .unwrap();
-    vm.execute_program().unwrap();
-}
-
-#[test]
-fn test_syscall_parameter_on_stack() {
-    let prog = assemble(
-        "
-        mov64 r1, r10
-        add64 r1, -0x100
-        mov64 r2, 0x1
-        call 0
-        mov64 r0, 0x0
-        exit",
-    )
-    .unwrap();
-
-    let executable = EbpfVm::<UserError>::create_executable_from_text_bytes(&prog, None).unwrap();
-    let mut vm = EbpfVm::<UserError>::new(executable.as_ref(), &[], &[]).unwrap();
-    vm.register_syscall(0, Syscall::Function(bpf_syscall_string))
-        .unwrap();
-    vm.execute_program().unwrap();
-}
-
-#[test]
-#[should_panic(expected = "UnresolvedSymbol(\"Unknown\", 29, 0)")]
-fn test_symbol_unresolved() {
-    let mut prog = assemble(
-        "
-        call -0x1
-        mov64 r0, 0x0
-        exit",
-    )
-    .unwrap();
-    LittleEndian::write_u32(&mut prog[4..8], ebpf::hash_symbol_name(b"log"));
-
-    let mem = [];
-
-    let executable = EbpfVm::<UserError>::create_executable_from_text_bytes(&prog, None).unwrap();
-    let mut vm = EbpfVm::<UserError>::new(executable.as_ref(), &mem, &[]).unwrap();
-    vm.execute_program().unwrap();
-}
-
-#[test]
-#[should_panic(expected = "UnresolvedSymbol(\"log_64\", 550, 4168)")]
-fn test_symbol_unresolved_elf() {
-    let mut file = File::open("tests/elfs/unresolved_syscall.so").expect("file open failed");
-    let mut elf = Vec::new();
-    file.read_to_end(&mut elf).unwrap();
-
-    let executable = EbpfVm::<UserError>::create_executable_from_elf(&elf, None).unwrap();
-    let mut vm = EbpfVm::<UserError>::new(executable.as_ref(), &[], &[]).unwrap();
-    vm.register_syscall_ex("log", Syscall::Function(bpf_syscall_string))
-        .unwrap();
-    vm.execute_program().unwrap();
 }
 
 #[test]
@@ -464,21 +386,6 @@ fn test_bpf_to_bpf_too_deep() {
     file.read_to_end(&mut elf).unwrap();
 
     let mem = [MAX_CALL_DEPTH as u8];
-    let executable = EbpfVm::<UserError>::create_executable_from_elf(&elf, None).unwrap();
-    let mut vm = EbpfVm::<UserError>::new(executable.as_ref(), &mem, &[]).unwrap();
-    vm.register_syscall_ex("log", Syscall::Function(bpf_syscall_string))
-        .unwrap();
-
-    vm.execute_program().unwrap();
-}
-
-#[test]
-fn test_relative_call() {
-    let mut file = File::open("tests/elfs/relative_call.so").expect("file open failed");
-    let mut elf = Vec::new();
-    file.read_to_end(&mut elf).unwrap();
-
-    let mem = [1 as u8];
     let executable = EbpfVm::<UserError>::create_executable_from_elf(&elf, None).unwrap();
     let mut vm = EbpfVm::<UserError>::new(executable.as_ref(), &mem, &[]).unwrap();
     vm.register_syscall_ex("log", Syscall::Function(bpf_syscall_string))
@@ -556,39 +463,6 @@ fn test_oob_callx_high() {
     let executable = EbpfVm::<UserError>::create_executable_from_text_bytes(&prog, None).unwrap();
     let mut vm = EbpfVm::<UserError>::new(executable.as_ref(), &[], &[]).unwrap();
     assert_eq!(42, vm.execute_program().unwrap());
-}
-
-#[test]
-fn test_bpf_to_bpf_scratch_registers() {
-    let mut file = File::open("tests/elfs/scratch_registers.so").expect("file open failed");
-    let mut elf = Vec::new();
-    file.read_to_end(&mut elf).unwrap();
-
-    let mem = [1];
-    let executable = EbpfVm::<UserError>::create_executable_from_elf(&elf, None).unwrap();
-    let mut vm = EbpfVm::<UserError>::new(executable.as_ref(), &mem, &[]).unwrap();
-    vm.register_syscall_ex("log", Syscall::Function(bpf_syscall_string))
-        .unwrap();
-    vm.register_syscall_ex("log_64", Syscall::Function(bpf_syscall_u64))
-        .unwrap();
-
-    assert_eq!(vm.execute_program().unwrap(), 112);
-}
-
-#[test]
-fn test_bpf_to_bpf_pass_stack_reference() {
-    let mut file = File::open("tests/elfs/pass_stack_reference.so").expect("file open failed");
-    let mut elf = Vec::new();
-    file.read_to_end(&mut elf).unwrap();
-
-    let executable = EbpfVm::<UserError>::create_executable_from_elf(&elf, None).unwrap();
-    let mut vm = EbpfVm::<UserError>::new(executable.as_ref(), &[], &[]).unwrap();
-    vm.register_syscall_ex("log", Syscall::Function(bpf_syscall_string))
-        .unwrap();
-    vm.register_syscall_ex("log_64", Syscall::Function(bpf_syscall_u64))
-        .unwrap();
-
-    assert_eq!(vm.execute_program().unwrap(), 42);
 }
 
 fn write_insn(prog: &mut [u8], insn: usize, asm: &str) {
@@ -669,23 +543,4 @@ fn test_fuzz_execute() {
             }
         },
     );
-}
-
-#[test]
-#[should_panic(expected = "UnresolvedSymbol(\"Unknown\", 34, 40)")]
-fn test_err_call_unresolved() {
-    let prog = assemble(
-        "
-        mov r1, 1
-        mov r2, 2
-        mov r3, 3
-        mov r4, 4
-        mov r5, 5
-        call 63
-        exit",
-    )
-    .unwrap();
-    let executable = EbpfVm::<UserError>::create_executable_from_text_bytes(&prog, None).unwrap();
-    let mut vm = EbpfVm::<UserError>::new(executable.as_ref(), &[], &[]).unwrap();
-    vm.execute_program().unwrap();
 }
