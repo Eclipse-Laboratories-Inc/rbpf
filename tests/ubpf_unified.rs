@@ -2081,6 +2081,65 @@ fn test_vm_jit_syscall_parameter_on_stack() {
     );
 }
 
+#[test]
+fn test_vm_jit_call_reg() {
+    test_vm_and_jit_asm!(
+        "
+        mov64 r0, 0x0
+        mov64 r8, 0x1
+        lsh64 r8, 0x20
+        or64 r8, 0x30
+        callx 0x8
+        exit
+        mov64 r0, 0x2A
+        exit",
+        [],
+        (),
+        { |res: ExecResult| { res.unwrap() == 42 } }
+    );
+}
+
+#[test]
+fn test_vm_jit_err_oob_callx_low() {
+    test_vm_and_jit_asm!(
+        "
+        mov64 r0, 0x0
+        callx 0x0
+        exit",
+        [],
+        (),
+        {
+            |res: ExecResult| {
+                matches!(res.unwrap_err(),
+                    EbpfError::CallOutsideTextSegment(pc, target_pc)
+                    if pc == 30 && target_pc == 0
+                )
+            }
+        }
+    );
+}
+
+#[test]
+fn test_vm_jit_err_oob_callx_high() {
+    test_vm_and_jit_asm!(
+        "
+        mov64 r0, -0x1
+        lsh64 r0, 0x20
+        callx 0x0
+        exit",
+        [],
+        (),
+        {
+            |res: ExecResult| {
+                matches!(res.unwrap_err(),
+                    EbpfError::CallOutsideTextSegment(pc, target_pc)
+                    if pc == 31 && target_pc == 0xffffffff00000000
+                )
+            }
+        }
+    );
+}
+
 // CALL_IMM : Syscalls
 
 /* TODO: syscalls::trash_registers needs asm!().

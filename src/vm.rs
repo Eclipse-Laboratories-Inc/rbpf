@@ -15,7 +15,7 @@ use crate::{
     disassembler, ebpf,
     elf::EBpfElf,
     error::{EbpfError, UserDefinedError},
-    jit,
+    jit::{self, JitProgram, JitProgramArgument},
     memory_region::{AccessType, MemoryMapping, MemoryRegion},
     user_error::UserError,
 };
@@ -54,9 +54,6 @@ macro_rules! translate_memory_access {
 ///   - Bad formed instruction.
 ///   - Unknown eBPF syscall index.
 pub type Verifier<E> = fn(prog: &[u8]) -> Result<(), E>;
-
-/// eBPF Jit-compiled program.
-pub type JitProgram<E> = unsafe fn(u64, &MemoryMapping) -> Result<u64, EbpfError<E>>;
 
 /// Syscall function without context.
 pub type SyscallFunction<E> =
@@ -629,7 +626,7 @@ impl<'a, E: UserDefinedError> EbpfVm<'a, E> {
                     if target_address < ebpf::MM_PROGRAM_START {
                         return Err(EbpfError::CallOutsideTextSegment(pc + ebpf::ELF_INSN_DUMP_OFFSET, reg[insn.imm as usize]));
                     }
-                    next_pc = Self::check_pc(&self.prog, pc, (target_address - self.prog_addr) as usize / ebpf::INSN_SIZE)?;
+                    next_pc = Self::check_pc(self.prog_addr, &self.prog, pc, (target_address - self.prog_addr) as usize / ebpf::INSN_SIZE)?;
                 },
 
                 // Do not delegate the check to the verifier, since registered functions can be
@@ -664,7 +661,7 @@ impl<'a, E: UserDefinedError> EbpfVm<'a, E> {
                                 ..ebpf::FIRST_SCRATCH_REG + ebpf::SCRATCH_REGS],
                             next_pc,
                         )?;
-                        next_pc = Self::check_pc(&self.prog, pc, *new_pc)?;
+                        next_pc = Self::check_pc(self.prog_addr, &self.prog, pc, *new_pc)?;
                     } else {
                         self.executable.report_unresolved_symbol(pc)?;
                     }
@@ -678,7 +675,7 @@ impl<'a, E: UserDefinedError> EbpfVm<'a, E> {
                                 ..ebpf::FIRST_SCRATCH_REG + ebpf::SCRATCH_REGS]
                                 .copy_from_slice(&saved_reg);
                             reg[ebpf::STACK_REG] = stack_ptr;
-                            next_pc = Self::check_pc(&self.prog, pc, ptr)?;
+                            next_pc = Self::check_pc(self.prog_addr, &self.prog, pc, ptr)?;
                         }
                         _ => {
                             debug!("BPF instructions executed: {:?}", self.total_insn_count);
@@ -702,13 +699,25 @@ impl<'a, E: UserDefinedError> EbpfVm<'a, E> {
         ))
     }
 
-    fn check_pc(prog: &[u8], current_pc: usize, new_pc: usize) -> Result<usize, EbpfError<E>> {
-        let offset = new_pc
-            .checked_mul(ebpf::INSN_SIZE)
-            .ok_or(EbpfError::CallOutsideTextSegment(current_pc, std::u64::MAX))?;
-        let _ = prog
-            .get(offset..offset + ebpf::INSN_SIZE)
-            .ok_or(EbpfError::CallOutsideTextSegment(current_pc, std::u64::MAX))?;
+    fn check_pc(
+        prog_addr: u64,
+        prog: &[u8],
+        current_pc: usize,
+        new_pc: usize,
+    ) -> Result<usize, EbpfError<E>> {
+        let offset =
+            new_pc
+                .checked_mul(ebpf::INSN_SIZE)
+                .ok_or(EbpfError::CallOutsideTextSegment(
+                    current_pc + ebpf::ELF_INSN_DUMP_OFFSET,
+                    prog_addr + (new_pc * ebpf::INSN_SIZE) as u64,
+                ))?;
+        let _ =
+            prog.get(offset..offset + ebpf::INSN_SIZE)
+                .ok_or(EbpfError::CallOutsideTextSegment(
+                    current_pc + ebpf::ELF_INSN_DUMP_OFFSET,
+                    prog_addr + (new_pc * ebpf::INSN_SIZE) as u64,
+                ))?;
         Ok(new_pc)
     }
 
@@ -758,8 +767,18 @@ impl<'a, E: UserDefinedError> EbpfVm<'a, E> {
         } else {
             0
         };
-        match self.compiled_prog {
-            Some(compiled_prog) => compiled_prog(reg1, &self.memory_mapping),
+        match &self.compiled_prog {
+            Some(compiled_prog) => {
+                let mut jit_arg: Vec<*const u8> =
+                    vec![std::ptr::null(); 2 + compiled_prog.instruction_addresses.len()];
+                libc::memcpy(
+                    jit_arg.as_mut_ptr() as _,
+                    std::mem::transmute::<_, _>(&self.memory_mapping),
+                    std::mem::size_of::<MemoryMapping>(),
+                );
+                jit_arg[2..].copy_from_slice(&compiled_prog.instruction_addresses[..]);
+                (compiled_prog.main)(reg1, &*(jit_arg.as_ptr() as *const JitProgramArgument))
+            }
             None => Err(EbpfError::JITNotCompiled),
         }
     }

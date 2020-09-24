@@ -12,6 +12,8 @@
 #![cfg_attr(rustfmt, rustfmt_skip)]
 #![allow(unreachable_code)]
 
+extern crate libc;
+
 use std;
 use std::mem;
 use std::collections::HashMap;
@@ -20,17 +22,32 @@ use std::fmt::Error as FormatterError;
 use std::ops::{Index, IndexMut};
 
 use crate::{
-    vm::JitProgram,
     vm::{Executable, Syscall},
     call_frames::CALL_FRAME_SIZE,
-    ebpf::{self, FIRST_SCRATCH_REG, SCRATCH_REGS, STACK_REG, MM_STACK_START},
+    ebpf::{self, INSN_SIZE, FIRST_SCRATCH_REG, SCRATCH_REGS, STACK_REG, MM_STACK_START, MM_PROGRAM_START},
     error::{UserDefinedError, EbpfError},
     memory_region::{AccessType, MemoryMapping},
     user_error::UserError,
 };
 
+/// eBPF Jit-compiled program.
+pub struct JitProgramArgument {
+    /// The MemoryMapping to be used to run the compiled code
+    pub memory_mapping: MemoryMapping,
+    /// Pointers to the instructions of the compiled code
+    pub instruction_addresses: [*const u8; 1],
+}
+
+/// eBPF Jit-compiled program.
+pub struct JitProgram<E: UserDefinedError> {
+    /// Call this with JitProgramArgument to execute the compiled code
+    pub main: unsafe fn(u64, &JitProgramArgument) -> Result<u64, EbpfError<E>>,
+    /// Pointers to the instructions of the compiled code
+    pub instruction_addresses: Vec<*const u8>,
+}
+
 /// A virtual method table for SyscallObject
-pub struct SyscallObjectVtable {
+struct SyscallObjectVtable {
     /// Drops the dyn trait object
     pub drop: fn(*const u8),
     /// Size of the dyn trait object in bytes
@@ -43,14 +60,12 @@ pub struct SyscallObjectVtable {
 
 // Could be replaced by https://doc.rust-lang.org/std/raw/struct.TraitObject.html
 /// A dyn trait fat pointer for SyscallObject
-pub struct SyscallTraitObject {
+struct SyscallTraitObject {
     /// Pointer to the actual object
     pub data: *const u8,
     /// Pointer to the virtual method table
     pub vtable: *const SyscallObjectVtable,
 }
-
-extern crate libc;
 
 /// Error definitions
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
@@ -66,8 +81,9 @@ pub enum JITError {
 const TARGET_OFFSET: isize = ebpf::PROG_MAX_INSNS as isize;
 const TARGET_PC_EXIT: isize = TARGET_OFFSET + 1;
 const TARGET_PC_EPILOGUE: isize = TARGET_OFFSET + 2;
-const TARGET_PC_DIV_BY_ZERO: isize = TARGET_OFFSET + 3;
-const TARGET_PC_EXCEPTION_AT: isize = TARGET_OFFSET + 4;
+const TARGET_PC_CALL_OUTSIDE_TEXT_SEGMENT: isize = TARGET_OFFSET + 3;
+const TARGET_PC_DIV_BY_ZERO: isize = TARGET_OFFSET + 4;
+const TARGET_PC_EXCEPTION_AT: isize = TARGET_OFFSET + 5;
 
 #[derive(Copy, Clone)]
 enum OperandSize {
@@ -109,7 +125,8 @@ const CALLEE_SAVED_REGISTERS: [u8; 6] = [
 
 // Special registers:
 // RDI Pointer to optional typed return value
-// R10 Stores a constant pointer to mem
+// RBP Stores a constant pointer to original RSP-8
+// R10 Stores a constant pointer to JitProgramArgument
 // R11 Scratch register for offsetting
 
 const REGISTER_MAP: [u8; 11] = [
@@ -290,6 +307,13 @@ fn emit_mov(jit: &mut JitMemory, src: u8, dst: u8) {
     emit_alu64(jit, 0x89, src, dst);
 }
 
+// Register to register exchange / swap
+#[allow(dead_code)]
+#[inline]
+fn emit_xchg(jit: &mut JitMemory, src: u8, dst: u8) {
+    emit_alu64(jit, 0x87, src, dst);
+}
+
 #[inline]
 fn emit_cmp_imm32(jit: &mut JitMemory, dst: u8, imm: i32) {
     emit_alu64_imm32(jit, 0x81, 7, dst, imm);
@@ -431,7 +455,7 @@ struct Argument {
 }
 
 #[inline]
-fn emit_bpf_call(jit: &mut JitMemory, dst: Value) {
+fn emit_bpf_call(jit: &mut JitMemory, dst: Value, number_of_instructions: usize, pc: usize) {
     for reg in REGISTER_MAP.iter().skip(FIRST_SCRATCH_REG).take(SCRATCH_REGS) {
         emit_push(jit, *reg);
     }
@@ -441,7 +465,35 @@ fn emit_bpf_call(jit: &mut JitMemory, dst: Value) {
     emit_alu64_imm32(jit, 0x81, 0, REGISTER_MAP[STACK_REG], CALL_FRAME_SIZE as i32 * 3); // stack_ptr += CALL_FRAME_SIZE * 3;
 
     match dst {
-        // Value::Register(reg) => {}, // TODO Translate target
+        Value::Register(reg) => {
+            // Move vm target_address into RAX
+            emit_mov(jit, reg, RAX);
+            emit_push(jit, RBX);
+            // Store PC in case the bounds check fails
+            emit_load_imm(jit, R11, pc as i64 + ebpf::ELF_INSN_DUMP_OFFSET as i64);
+            // Force alignment of RAX
+            emit_alu64_imm32(jit, 0x81, 4, RAX, !7); // RAX &= !(8 - 1);
+            // Upper bound check
+            // if(RAX > MM_PROGRAM_START + (number_of_instructions - 1) * INSN_SIZE) throw CALL_OUTSIDE_TEXT_SEGMENT;
+            emit_load_imm(jit, RBX, MM_PROGRAM_START as i64 + ((number_of_instructions - 1) * INSN_SIZE) as i64);
+            emit_cmp(jit, RBX, RAX);
+            emit_jcc(jit, 0x87, TARGET_PC_CALL_OUTSIDE_TEXT_SEGMENT);
+            // Lower bound check
+            // if(RAX < MM_PROGRAM_START) throw CALL_OUTSIDE_TEXT_SEGMENT;
+            emit_load_imm(jit, RBX, MM_PROGRAM_START as i64);
+            emit_cmp(jit, RBX, RAX);
+            emit_jcc(jit, 0x82, TARGET_PC_CALL_OUTSIDE_TEXT_SEGMENT);
+            // Calculate offset relative to instruction_addresses
+            emit_alu64(jit, 0x29, RBX, RAX); // RAX -= MM_PROGRAM_START;
+            // Load host target_address from JitProgramArgument.instruction_addresses
+            emit_mov(jit, R10, RBX);
+            emit_alu64(jit, 0x01, RBX, RAX); // RAX += &JitProgramArgument as *const _;
+            emit_pop(jit, RBX);
+            emit_load(jit, OperandSize::S64, RAX, RAX, std::mem::size_of::<MemoryMapping>() as i32); // RAX = JitProgramArgument.instruction_addresses[RAX / 8];
+            // callq *%rax
+            emit1(jit, 0xff);
+            emit1(jit, 0xd0);
+        },
         Value::Constant(target_pc) => {
             emit1(jit, 0xe8);
             emit_jump_offset(jit, target_pc as isize);
@@ -523,7 +575,7 @@ fn emit_rust_call(jit: &mut JitMemory, function: *const u8, arguments: &[Argumen
 fn emit_address_translation(jit: &mut JitMemory, host_addr: u8, vm_addr: Value, len: u64, access_type: AccessType, pc: usize) {
     emit_rust_call(jit, MemoryMapping::map::<UserError> as *const u8, &[
         Argument { index: 3, value: vm_addr }, // Specify first as the src register could be overwritten by other arguments
-        Argument { index: 1, value: Value::Register(R10) }, // memory_mapping
+        Argument { index: 1, value: Value::Register(R10) }, // JitProgramArgument::memory_mapping
         Argument { index: 2, value: Value::Constant(access_type as i64) },
         Argument { index: 4, value: Value::Constant(len as i64) },
     ]);
@@ -655,7 +707,7 @@ impl<'a> JitMemory<'a> {
         }
 
         // Initialize registers
-        emit_mov(self, ARGUMENT_REGISTERS[2], R10); // memory_mapping
+        emit_mov(self, ARGUMENT_REGISTERS[2], R10); // JitProgramArgument
         emit_load_imm(self, REGISTER_MAP[STACK_REG], MM_STACK_START as i64 + CALL_FRAME_SIZE as i64);
         for reg in REGISTER_MAP.iter() {
             if *reg != REGISTER_MAP[1] && *reg != REGISTER_MAP[STACK_REG] {
@@ -859,7 +911,7 @@ impl<'a> JitMemory<'a> {
                     emit_alu64(self, 0xd3, 4, dst);
                     emit_mov(self, R11, RCX);
                 },
-                ebpf::RSH64_IMM  =>  emit_alu64_imm8(self, 0xc1, 5, dst, insn.imm as i8),
+                ebpf::RSH64_IMM  => emit_alu64_imm8(self, 0xc1, 5, dst, insn.imm as i8),
                 ebpf::RSH64_REG  => {
                     emit_mov(self, RCX, R11);
                     emit_mov(self, src, RCX);
@@ -982,7 +1034,7 @@ impl<'a> JitMemory<'a> {
                                     Argument { index: 3, value: Value::Register(ARGUMENT_REGISTERS[3]) },
                                     Argument { index: 4, value: Value::Register(ARGUMENT_REGISTERS[4]) },
                                     Argument { index: 5, value: Value::Register(ARGUMENT_REGISTERS[5]) },
-                                    Argument { index: 6, value: Value::Register(R10) }, // memory_mapping
+                                    Argument { index: 6, value: Value::Register(R10) }, // JitProgramArgument::memory_mapping
                                 ]);
                             },
                             Syscall::Object(boxed) => {
@@ -999,7 +1051,7 @@ impl<'a> JitMemory<'a> {
                                     Argument { index: 2, value: Value::Register(ARGUMENT_REGISTERS[1]) },
                                     Argument { index: 1, value: Value::Constant(unsafe { (*fat_ptr).data } as i64) }, // "&mut self" in the "call" method of the SyscallObject
                                     Argument { index: 6, value: Value::Register(ARGUMENT_REGISTERS[5]) },
-                                    Argument { index: 7, value: Value::Register(R10) }, // memory_mapping
+                                    Argument { index: 7, value: Value::Register(R10) }, // JitProgramArgument::memory_mapping
                                 ]);
                             },
                         }
@@ -1012,15 +1064,14 @@ impl<'a> JitMemory<'a> {
                     } else {
                         match executable.lookup_bpf_call(insn.imm as u32) {
                             Some(target_pc) => {
-                                emit_bpf_call(self, Value::Constant(*target_pc as i64));
+                                emit_bpf_call(self, Value::Constant(*target_pc as i64), prog.len() / ebpf::INSN_SIZE, insn_ptr);
                             },
                             None => executable.report_unresolved_symbol(insn_ptr)?,
                         }
                     }
                 },
                 ebpf::CALL_REG  => {
-                    unimplemented!();
-                    // emit_bpf_call(self, Value::Register(REGISTER_MAP[insn.imm as usize]));
+                    emit_bpf_call(self, Value::Register(REGISTER_MAP[insn.imm as usize]), prog.len() / ebpf::INSN_SIZE, insn_ptr);
                 },
                 ebpf::EXIT      => {
                     emit_alu64_imm32(self, 0x81, 4, REGISTER_MAP[STACK_REG], !(CALL_FRAME_SIZE as i32 * 2 - 1)); // stack_ptr &= !(CALL_FRAME_SIZE * 2 - 1);
@@ -1067,30 +1118,35 @@ impl<'a> JitMemory<'a> {
 
         emit1(self, 0xc3); // ret
 
-        // Handler for division by zero exceptions
+        // Handler for EbpfError::CallOutsideTextSegment
+        set_anchor(self, TARGET_PC_CALL_OUTSIDE_TEXT_SEGMENT);
+        emit_store(self, OperandSize::S64, REGISTER_MAP[0], RDI, 24); // target_address = RAX
+        let err = Result::<u64, EbpfError<E>>::Err(EbpfError::CallOutsideTextSegment(0, 0));
+        let err_kind = unsafe { *(&err as *const _ as *const u64).offset(1) };
+        emit_load_imm(self, REGISTER_MAP[0], err_kind as i64);
+        emit_store(self, OperandSize::S64, REGISTER_MAP[0], RDI, 8); // err_kind = EbpfError::CallOutsideTextSegment
+        emit_jmp(self, TARGET_PC_EXCEPTION_AT);
+
+        // Handler for EbpfError::DivideByZero
         set_anchor(self, TARGET_PC_DIV_BY_ZERO);
-        // Store which error occured
         let err = Result::<u64, EbpfError<E>>::Err(EbpfError::DivideByZero(0));
         let err_kind = unsafe { *(&err as *const _ as *const u64).offset(1) };
         emit_load_imm(self, REGISTER_MAP[0], err_kind as i64);
-        emit_store(self, OperandSize::S64, REGISTER_MAP[0], RDI, 8);
+        emit_store(self, OperandSize::S64, REGISTER_MAP[0], RDI, 8); // err_kind = EbpfError::DivideByZero
         // Fall-through to TARGET_PC_EXCEPTION_AT
 
         // Handler for exceptions which report their PC
         set_anchor(self, TARGET_PC_EXCEPTION_AT);
-        // Store that an error occured
         emit_load_imm(self, REGISTER_MAP[0], 1);
-        emit_store(self, OperandSize::S64, REGISTER_MAP[0], RDI, 0);
-        // emit_address_translation and muldivmod store pc in R11
-        emit_store(self, OperandSize::S64, R11, RDI, 16);
+        emit_store(self, OperandSize::S64, REGISTER_MAP[0], RDI, 0); // is_err = true
+        emit_store(self, OperandSize::S64, R11, RDI, 16); // pc = insn_ptr
         // goto exit
         emit_jmp(self, TARGET_PC_EPILOGUE);
 
         Ok(())
     }
 
-    fn resolve_jumps(&mut self) -> Result<(), JITError>
-    {
+    fn resolve_jumps(&mut self) -> Result<(), JITError> {
         for jump in &self.jumps {
             let target_loc = match self.special_targets.get(&jump.target_pc) {
                 Some(target) => *target,
@@ -1154,5 +1210,8 @@ pub fn compile<'a, E: UserDefinedError>(prog: &'a [u8],
     jit.jit_compile(prog, executable, syscalls)?;
     jit.resolve_jumps()?;
 
-    Ok(unsafe { mem::transmute(jit.contents.as_ptr()) })
+    Ok(JitProgram {
+        main: unsafe { mem::transmute(jit.contents.as_ptr()) },
+        instruction_addresses: jit.pc_locs.iter().map(|offset| unsafe { jit.contents.as_ptr().add(*offset) }).collect(),
+    })
 }
