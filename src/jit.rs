@@ -67,16 +67,6 @@ struct SyscallTraitObject {
     pub vtable: *const SyscallObjectVtable,
 }
 
-/// Error definitions
-#[derive(Debug, thiserror::Error, PartialEq, Eq)]
-pub enum JITError {
-    /// Failed to parse ELF file
-    #[error("Unknown eBPF opcode {0:#2x} (insn #{1:?})")]
-    UnknownOpCode(u8, usize),
-    #[error("Unsupported (insn #{0:?})")]
-    Unsupported(usize),
-}
-
 // Special values for target_pc in struct Jump
 const TARGET_OFFSET: isize = ebpf::PROG_MAX_INSNS as isize;
 const TARGET_PC_EXIT: isize = TARGET_OFFSET + 1;
@@ -613,7 +603,7 @@ fn muldivmod(jit: &mut JitMemory, pc: u16, opc: u8, src: u8, dst: u8, imm: i32) 
 
     if div || modrm {
         // Save pc
-        emit_load_imm(jit, R11, pc as i64);
+        emit_load_imm(jit, R11, pc as i64 + ebpf::ELF_INSN_DUMP_OFFSET as i64);
 
         // test src,src
         if is64 {
@@ -874,6 +864,7 @@ impl<'a> JitMemory<'a> {
                 ebpf::LSH32_REG  => {
                     emit_mov(self, RCX, R11);
                     emit_mov(self, src, RCX);
+                    emit_alu64_imm32(self, 0x81, 4, RCX, 31); // Mask shift amount
                     emit_alu32(self, 0xd3, 4, dst);
                     emit_mov(self, R11, RCX);
                 },
@@ -881,6 +872,7 @@ impl<'a> JitMemory<'a> {
                 ebpf::RSH32_REG  => {
                     emit_mov(self, RCX, R11);
                     emit_mov(self, src, RCX);
+                    emit_alu64_imm32(self, 0x81, 4, RCX, 31); // Mask shift amount
                     emit_alu32(self, 0xd3, 5, dst);
                     emit_mov(self, R11, RCX);
                 },
@@ -893,6 +885,7 @@ impl<'a> JitMemory<'a> {
                 ebpf::ARSH32_REG => {
                     emit_mov(self, RCX, R11);
                     emit_mov(self, src, RCX);
+                    emit_alu64_imm32(self, 0x81, 4, RCX, 31); // Mask shift amount
                     emit_alu32(self, 0xd3, 7, dst);
                     emit_mov(self, R11, RCX);
                 },
@@ -934,6 +927,7 @@ impl<'a> JitMemory<'a> {
                 ebpf::LSH64_REG  => {
                     emit_mov(self, RCX, R11);
                     emit_mov(self, src, RCX);
+                    emit_alu64_imm32(self, 0x81, 4, RCX, 63); // Mask shift amount
                     emit_alu64(self, 0xd3, 4, dst);
                     emit_mov(self, R11, RCX);
                 },
@@ -941,6 +935,7 @@ impl<'a> JitMemory<'a> {
                 ebpf::RSH64_REG  => {
                     emit_mov(self, RCX, R11);
                     emit_mov(self, src, RCX);
+                    emit_alu64_imm32(self, 0x81, 4, RCX, 63); // Mask shift amount
                     emit_alu64(self, 0xd3, 5, dst);
                     emit_mov(self, R11, RCX);
                 },
@@ -953,6 +948,7 @@ impl<'a> JitMemory<'a> {
                 ebpf::ARSH64_REG => {
                     emit_mov(self, RCX, R11);
                     emit_mov(self, src, RCX);
+                    emit_alu64_imm32(self, 0x81, 4, RCX, 63); // Mask shift amount
                     emit_alu64(self, 0xd3, 7, dst);
                     emit_mov(self, R11, RCX);
                 },
@@ -1116,7 +1112,7 @@ impl<'a> JitMemory<'a> {
                     emit1(self, 0xc3); // ret near
                 },
 
-                _               => return Err(EbpfError::JITError(JITError::UnknownOpCode(insn.opc, insn_ptr))),
+                _               => return Err(EbpfError::UnsupportedInstruction(insn_ptr)),
             }
 
             insn_ptr += 1;
@@ -1151,7 +1147,7 @@ impl<'a> JitMemory<'a> {
         let err = Result::<u64, EbpfError<E>>::Err(EbpfError::CallDepthExceeded(0, 0));
         let err_kind = unsafe { *(&err as *const _ as *const u64).offset(1) };
         emit_load_imm(self, REGISTER_MAP[0], err_kind as i64);
-        emit_store(self, OperandSize::S64, REGISTER_MAP[0], RDI, 8); // err_kind = EbpfError::CallOutsideTextSegment
+        emit_store(self, OperandSize::S64, REGISTER_MAP[0], RDI, 8); // err_kind = EbpfError::CallDepthExceeded
         emit_load_imm(self, REGISTER_MAP[0], MAX_CALL_DEPTH as i64);
         emit_store(self, OperandSize::S64, REGISTER_MAP[0], RDI, 24); // depth = MAX_CALL_DEPTH
         emit_jmp(self, TARGET_PC_EXCEPTION_AT);
@@ -1184,7 +1180,7 @@ impl<'a> JitMemory<'a> {
         Ok(())
     }
 
-    fn resolve_jumps(&mut self) -> Result<(), JITError> {
+    fn resolve_jumps(&mut self) {
         for jump in &self.jumps {
             let target_loc = match self.special_targets.get(&jump.target_pc) {
                 Some(target) => *target,
@@ -1202,7 +1198,6 @@ impl<'a> JitMemory<'a> {
                              std::mem::size_of::<i32>());
             }
         }
-        Ok(())
     }
 } // struct JitMemory
 
@@ -1246,7 +1241,7 @@ pub fn compile<'a, E: UserDefinedError>(prog: &'a [u8],
     // possible length
     let mut jit = JitMemory::new(1);
     jit.jit_compile(prog, executable, syscalls)?;
-    jit.resolve_jumps()?;
+    jit.resolve_jumps();
 
     Ok(JitProgram {
         main: unsafe { mem::transmute(jit.contents.as_ptr()) },
