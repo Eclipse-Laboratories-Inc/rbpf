@@ -55,15 +55,17 @@ macro_rules! translate_memory_access {
 ///   - Unknown eBPF syscall index.
 pub type Verifier<E> = fn(prog: &[u8]) -> Result<(), E>;
 
+/// Return value of programs and syscalls
+pub type ProgramResult<E> = Result<u64, EbpfError<E>>;
+
 /// Syscall function without context.
-pub type SyscallFunction<E> =
-    fn(u64, u64, u64, u64, u64, &MemoryMapping) -> Result<u64, EbpfError<E>>;
+pub type SyscallFunction<E> = fn(u64, u64, u64, u64, u64, &MemoryMapping) -> ProgramResult<E>;
 
 /// Syscall with context
 pub trait SyscallObject<E: UserDefinedError> {
     /// Call the syscall function
     #[allow(clippy::too_many_arguments)]
-    fn call(&mut self, u64, u64, u64, u64, u64, &MemoryMapping) -> Result<u64, EbpfError<E>>;
+    fn call(&mut self, u64, u64, u64, u64, u64, &MemoryMapping) -> ProgramResult<E>;
 }
 
 /// Contains the syscall
@@ -95,11 +97,13 @@ pub trait InstructionMeter {
     /// Get the number of remaining instructions allowed
     fn get_remaining(&self) -> u64;
 }
-struct DefaultInstructionMeter {}
+
+/// Instruction meter without a limit
+pub struct DefaultInstructionMeter {}
 impl InstructionMeter for DefaultInstructionMeter {
     fn consume(&mut self, _amount: u64) {}
     fn get_remaining(&self) -> u64 {
-        std::u64::MAX
+        std::i64::MAX as u64
     }
 }
 
@@ -108,7 +112,7 @@ impl InstructionMeter for DefaultInstructionMeter {
 /// # Examples
 ///
 /// ```
-/// use solana_rbpf::{vm::EbpfVm, user_error::UserError};
+/// use solana_rbpf::{vm::{EbpfVm, DefaultInstructionMeter}, user_error::UserError};
 ///
 /// let prog = &[
 ///     0x95, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00  // exit
@@ -122,7 +126,7 @@ impl InstructionMeter for DefaultInstructionMeter {
 /// let mut vm = EbpfVm::<UserError>::new(executable.as_ref(), mem, &[]).unwrap();
 ///
 /// // Provide a reference to the packet data.
-/// let res = vm.execute_program().unwrap();
+/// let res = vm.execute_program_interpreted(&mut DefaultInstructionMeter {}).unwrap();
 /// assert_eq!(res, 0);
 /// ```
 pub struct EbpfVm<'a, E: UserDefinedError> {
@@ -297,7 +301,7 @@ impl<'a, E: UserDefinedError> EbpfVm<'a, E> {
     /// # Examples
     ///
     /// ```
-    /// use solana_rbpf::{vm::EbpfVm, user_error::UserError};
+    /// use solana_rbpf::{vm::{EbpfVm, DefaultInstructionMeter}, user_error::UserError};
     ///
     /// let prog = &[
     ///     0x95, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00  // exit
@@ -311,28 +315,23 @@ impl<'a, E: UserDefinedError> EbpfVm<'a, E> {
     /// let mut vm = EbpfVm::<UserError>::new(executable.as_ref(), mem, &[]).unwrap();
     ///
     /// // Provide a reference to the packet data.
-    /// let res = vm.execute_program().unwrap();
+    /// let res = vm.execute_program_interpreted(&mut DefaultInstructionMeter {}).unwrap();
     /// assert_eq!(res, 0);
     /// ```
-    pub fn execute_program(&mut self) -> Result<u64, EbpfError<E>> {
-        self.execute_program_metered(DefaultInstructionMeter {})
-    }
-
-    /// Execute the program loaded, with the given instruction meter.
-    pub fn execute_program_metered<I: InstructionMeter>(
+    pub fn execute_program_interpreted<I: InstructionMeter>(
         &mut self,
-        mut instruction_meter: I,
-    ) -> Result<u64, EbpfError<E>> {
-        let result = self.execute_program_inner(&mut instruction_meter);
+        instruction_meter: &mut I,
+    ) -> ProgramResult<E> {
+        let result = self.execute_program_interpreted_inner(instruction_meter);
         instruction_meter.consume(self.last_insn_count);
         result
     }
 
     #[rustfmt::skip]
-    fn execute_program_inner<I: InstructionMeter>(
+    fn execute_program_interpreted_inner<I: InstructionMeter>(
         &mut self,
         instruction_meter: &mut I,
-    ) -> Result<u64, EbpfError<E>> {
+    ) -> ProgramResult<E> {
         const U32MAX: u64 = u32::MAX as u64;
 
         // R1 points to beginning of input memory, R10 to the stack of the first frame
@@ -675,7 +674,7 @@ impl<'a, E: UserDefinedError> EbpfVm<'a, E> {
                 _ => return Err(EbpfError::UnsupportedInstruction(pc + ebpf::ELF_INSN_DUMP_OFFSET)),
             }
             if self.last_insn_count >= remaining_insn_count {
-                return Err(EbpfError::ExceededMaxInstructions(self.total_insn_count));
+                return Err(EbpfError::ExceededMaxInstructions(pc + 1 + ebpf::ELF_INSN_DUMP_OFFSET, self.total_insn_count));
             }
         }
 
@@ -728,12 +727,17 @@ impl<'a, E: UserDefinedError> EbpfVm<'a, E> {
     /// vm.jit_compile();
     /// ```
     pub fn jit_compile(&mut self) -> Result<(), EbpfError<E>> {
-        self.compiled_prog = Some(jit::compile(self.prog, self.executable, &self.syscalls)?);
+        self.compiled_prog = Some(jit::compile(
+            self.prog,
+            self.executable,
+            &self.syscalls,
+            true,
+        )?);
         Ok(())
     }
 
     /// Execute the previously JIT-compiled program, with the given packet data in a manner
-    /// very similar to `execute_program()`.
+    /// very similar to `execute_program_interpreted()`.
     ///
     /// # Safety
     ///
@@ -742,7 +746,10 @@ impl<'a, E: UserDefinedError> EbpfVm<'a, E> {
     ///
     /// For this reason the function should be called from within an `unsafe` bloc.
     ///
-    pub unsafe fn execute_program_jit(&self) -> Result<u64, EbpfError<E>> {
+    pub unsafe fn execute_program_jit<I: InstructionMeter>(
+        &mut self,
+        instruction_meter: &mut I,
+    ) -> ProgramResult<E> {
         let reg1 = if self
             .memory_mapping
             .map::<UserError>(AccessType::Store, ebpf::MM_INPUT_START, 1)
@@ -752,19 +759,35 @@ impl<'a, E: UserDefinedError> EbpfVm<'a, E> {
         } else {
             0
         };
-        match &self.compiled_prog {
-            Some(compiled_prog) => {
-                let mut jit_arg: Vec<*const u8> =
-                    vec![std::ptr::null(); 2 + compiled_prog.instruction_addresses.len()];
-                libc::memcpy(
-                    jit_arg.as_mut_ptr() as _,
-                    std::mem::transmute::<_, _>(&self.memory_mapping),
-                    std::mem::size_of::<MemoryMapping>(),
-                );
-                jit_arg[2..].copy_from_slice(&compiled_prog.instruction_addresses[..]);
-                (compiled_prog.main)(reg1, &*(jit_arg.as_ptr() as *const JitProgramArgument))
-            }
-            None => Err(EbpfError::JITNotCompiled),
+        let compiled_prog = self
+            .compiled_prog
+            .as_ref()
+            .ok_or(EbpfError::JITNotCompiled)?;
+        let remaining_insn_count = instruction_meter.get_remaining();
+        let mut jit_arg: Vec<*const u8> = vec![
+            std::ptr::null();
+            std::mem::size_of::<JitProgramArgument>()
+                / std::mem::size_of::<*const u8>()
+                + compiled_prog.instruction_addresses.len()
+        ];
+        libc::memcpy(
+            jit_arg.as_mut_ptr() as _,
+            std::mem::transmute::<_, _>(&self.memory_mapping),
+            std::mem::size_of::<MemoryMapping>(),
+        );
+        jit_arg[2] = remaining_insn_count as _;
+        jit_arg[3..].copy_from_slice(&compiled_prog.instruction_addresses[..]);
+        let result: ProgramResult<E> = Ok(0);
+        self.total_insn_count = (remaining_insn_count as i64
+            - (compiled_prog.main)(
+                &result,
+                reg1,
+                &*(jit_arg.as_ptr() as *const JitProgramArgument),
+            ) as i64) as u64;
+        if self.total_insn_count > remaining_insn_count {
+            self.total_insn_count = remaining_insn_count;
         }
+        instruction_meter.consume(self.total_insn_count);
+        result
     }
 }

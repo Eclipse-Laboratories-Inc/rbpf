@@ -18,11 +18,11 @@ use solana_rbpf::{
     call_frames::MAX_CALL_DEPTH,
     ebpf::hash_symbol_name,
     elf::ELFError,
-    error::EbpfError,
+    error::{EbpfError, UserDefinedError},
     memory_region::{AccessType, MemoryMapping},
     syscalls,
     user_error::UserError,
-    vm::{EbpfVm, Syscall, SyscallObject},
+    vm::{DefaultInstructionMeter, EbpfVm, InstructionMeter, Syscall, SyscallObject},
 };
 use std::{fs::File, io::Read, slice::from_raw_parts, str::from_utf8};
 
@@ -32,14 +32,15 @@ macro_rules! test_vm_and_jit {
     ($vm:expr, $($location:expr => $syscall:expr),*) => {
         $($vm.register_syscall($location, $syscall).unwrap();)*
     };
-    ( $executable:expr, $mem:tt, ($($location:expr => $syscall:expr),*), $check:tt ) => {
+    ( $executable:expr, $mem:tt, ($($location:expr => $syscall:expr),*), $check:block, $instruction_meter:expr, $expected_instruction_count:expr ) => {
         let check_closure = $check;
-        {
+        let instruction_count_interpreter = {
             let mem = $mem;
             let mut vm = EbpfVm::<UserError>::new($executable.as_ref(), &mem, &[]).unwrap();
             test_vm_and_jit!(vm, $($location => $syscall),*);
-            assert!(check_closure(vm.execute_program()));
-        }
+            assert!(check_closure(vm.execute_program_interpreted(&mut $instruction_meter)));
+            vm.get_total_instruction_count()
+        };
         #[cfg(not(windows))]
         {
             let mem = $mem;
@@ -47,27 +48,32 @@ macro_rules! test_vm_and_jit {
             test_vm_and_jit!(vm, $($location => $syscall),*);
             match vm.jit_compile() {
                 Err(err) => assert!(check_closure(Err(err))),
-                Ok(()) => assert!(check_closure(unsafe { vm.execute_program_jit() })),
+                Ok(()) => {
+                    assert!(check_closure(unsafe { vm.execute_program_jit(&mut $instruction_meter) }));
+                    let instruction_count_jit = vm.get_total_instruction_count();
+                    assert_eq!(instruction_count_interpreter, instruction_count_jit);
+                },
             }
         }
+        assert_eq!(instruction_count_interpreter, $expected_instruction_count);
     };
 }
 
 macro_rules! test_vm_and_jit_asm {
-    ( $source:tt, $mem:tt, ($($location:expr => $syscall:expr),* $(,)?), $check:tt ) => {
+    ( $source:tt, $mem:tt, ($($location:expr => $syscall:expr),* $(,)?), $check:block, $instruction_meter:expr, $expected_instruction_count:expr ) => {
         let program = assemble($source).unwrap();
         let executable = EbpfVm::<UserError>::create_executable_from_text_bytes(&program, None).unwrap();
-        test_vm_and_jit!(executable, $mem, ($($location => $syscall),*), $check);
+        test_vm_and_jit!(executable, $mem, ($($location => $syscall),*), $check, $instruction_meter, $expected_instruction_count);
     };
 }
 
 macro_rules! test_vm_and_jit_elf {
-    ( $source:tt, $mem:tt, ($($location:expr => $syscall:expr),* $(,)?), $check:tt ) => {
+    ( $source:tt, $mem:tt, ($($location:expr => $syscall:expr),* $(,)?), $check:block, $instruction_meter:expr, $expected_instruction_count:expr ) => {
         let mut file = File::open($source).unwrap();
         let mut elf = Vec::new();
         file.read_to_end(&mut elf).unwrap();
         let executable = EbpfVm::<UserError>::create_executable_from_elf(&elf, None).unwrap();
-        test_vm_and_jit!(executable, $mem, ($($location => $syscall),*), $check);
+        test_vm_and_jit!(executable, $mem, ($($location => $syscall),*), $check, $instruction_meter, $expected_instruction_count);
     };
 }
 
@@ -82,7 +88,9 @@ fn test_vm_jit_mov() {
         exit",
         [],
         (),
-        { |res: ExecResult| { res.unwrap() == 0x1 } }
+        { |res: ExecResult| { res.unwrap() == 0x1 } },
+        DefaultInstructionMeter {},
+        3
     );
 }
 
@@ -94,7 +102,9 @@ fn test_vm_jit_mov32_imm_large() {
         exit",
         [],
         (),
-        { |res: ExecResult| { res.unwrap() == 0xffffffff } }
+        { |res: ExecResult| { res.unwrap() == 0xffffffff } },
+        DefaultInstructionMeter {},
+        2
     );
 }
 
@@ -107,7 +117,9 @@ fn test_vm_jit_mov_large() {
         exit",
         [],
         (),
-        { |res: ExecResult| { res.unwrap() == 0xffffffff } }
+        { |res: ExecResult| { res.unwrap() == 0xffffffff } },
+        DefaultInstructionMeter {},
+        3
     );
 }
 
@@ -124,7 +136,9 @@ fn test_vm_jit_bounce() {
         exit",
         [],
         (),
-        { |res: ExecResult| { res.unwrap() == 0x1 } }
+        { |res: ExecResult| { res.unwrap() == 0x1 } },
+        DefaultInstructionMeter {},
+        7
     );
 }
 
@@ -139,7 +153,9 @@ fn test_vm_jit_add32() {
         exit",
         [],
         (),
-        { |res: ExecResult| { res.unwrap() == 0x3 } }
+        { |res: ExecResult| { res.unwrap() == 0x3 } },
+        DefaultInstructionMeter {},
+        5
     );
 }
 
@@ -152,7 +168,9 @@ fn test_vm_jit_neg32() {
         exit",
         [],
         (),
-        { |res: ExecResult| { res.unwrap() == 0xfffffffe } }
+        { |res: ExecResult| { res.unwrap() == 0xfffffffe } },
+        DefaultInstructionMeter {},
+        3
     );
 }
 
@@ -165,7 +183,9 @@ fn test_vm_jit_neg64() {
         exit",
         [],
         (),
-        { |res: ExecResult| { res.unwrap() == 0xfffffffffffffffe } }
+        { |res: ExecResult| { res.unwrap() == 0xfffffffffffffffe } },
+        DefaultInstructionMeter {},
+        3
     );
 }
 
@@ -194,7 +214,9 @@ fn test_vm_jit_alu32_arithmetic() {
         exit",
         [],
         (),
-        { |res: ExecResult| { res.unwrap() == 0x2a } }
+        { |res: ExecResult| { res.unwrap() == 0x2a } },
+        DefaultInstructionMeter {},
+        19
     );
 }
 
@@ -223,7 +245,9 @@ fn test_vm_jit_alu64_arithmetic() {
         exit",
         [],
         (),
-        { |res: ExecResult| { res.unwrap() == 0x2a } }
+        { |res: ExecResult| { res.unwrap() == 0x2a } },
+        DefaultInstructionMeter {},
+        19
     );
 }
 
@@ -254,7 +278,9 @@ fn test_vm_jit_alu32_logic() {
         exit",
         [],
         (),
-        { |res: ExecResult| { res.unwrap() == 0x11 } }
+        { |res: ExecResult| { res.unwrap() == 0x11 } },
+        DefaultInstructionMeter {},
+        21
     );
 }
 
@@ -287,7 +313,9 @@ fn test_vm_jit_alu64_logic() {
         exit",
         [],
         (),
-        { |res: ExecResult| { res.unwrap() == 0x11 } }
+        { |res: ExecResult| { res.unwrap() == 0x11 } },
+        DefaultInstructionMeter {},
+        23
     );
 }
 
@@ -301,7 +329,9 @@ fn test_vm_jit_arsh32_high_shift() {
         exit",
         [],
         (),
-        { |res: ExecResult| { res.unwrap() == 0x4 } }
+        { |res: ExecResult| { res.unwrap() == 0x4 } },
+        DefaultInstructionMeter {},
+        4
     );
 }
 
@@ -315,7 +345,9 @@ fn test_vm_jit_arsh32_imm() {
         exit",
         [],
         (),
-        { |res: ExecResult| { res.unwrap() == 0xffff8000 } }
+        { |res: ExecResult| { res.unwrap() == 0xffff8000 } },
+        DefaultInstructionMeter {},
+        4
     );
 }
 
@@ -330,7 +362,9 @@ fn test_vm_jit_arsh32_reg() {
         exit",
         [],
         (),
-        { |res: ExecResult| { res.unwrap() == 0xffff8000 } }
+        { |res: ExecResult| { res.unwrap() == 0xffff8000 } },
+        DefaultInstructionMeter {},
+        5
     );
 }
 
@@ -346,7 +380,9 @@ fn test_vm_jit_arsh64() {
         exit",
         [],
         (),
-        { |res: ExecResult| { res.unwrap() == 0xfffffffffffffff8 } }
+        { |res: ExecResult| { res.unwrap() == 0xfffffffffffffff8 } },
+        DefaultInstructionMeter {},
+        6
     );
 }
 
@@ -360,7 +396,9 @@ fn test_vm_jit_lsh64_reg() {
         exit",
         [],
         (),
-        { |res: ExecResult| { res.unwrap() == 0x10 } }
+        { |res: ExecResult| { res.unwrap() == 0x10 } },
+        DefaultInstructionMeter {},
+        4
     );
 }
 
@@ -374,7 +412,9 @@ fn test_vm_jit_rhs32_imm() {
         exit",
         [],
         (),
-        { |res: ExecResult| { res.unwrap() == 0x00ffffff } }
+        { |res: ExecResult| { res.unwrap() == 0x00ffffff } },
+        DefaultInstructionMeter {},
+        4
     );
 }
 
@@ -388,7 +428,9 @@ fn test_vm_jit_rsh64_reg() {
         exit",
         [],
         (),
-        { |res: ExecResult| { res.unwrap() == 0x1 } }
+        { |res: ExecResult| { res.unwrap() == 0x1 } },
+        DefaultInstructionMeter {},
+        4
     );
 }
 
@@ -401,7 +443,9 @@ fn test_vm_jit_be16() {
         exit",
         [0x11, 0x22],
         (),
-        { |res: ExecResult| { res.unwrap() == 0x1122 } }
+        { |res: ExecResult| { res.unwrap() == 0x1122 } },
+        DefaultInstructionMeter {},
+        3
     );
 }
 
@@ -414,7 +458,9 @@ fn test_vm_jit_be16_high() {
         exit",
         [0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88],
         (),
-        { |res: ExecResult| { res.unwrap() == 0x1122 } }
+        { |res: ExecResult| { res.unwrap() == 0x1122 } },
+        DefaultInstructionMeter {},
+        3
     );
 }
 
@@ -427,7 +473,9 @@ fn test_vm_jit_be32() {
         exit",
         [0x11, 0x22, 0x33, 0x44],
         (),
-        { |res: ExecResult| { res.unwrap() == 0x11223344 } }
+        { |res: ExecResult| { res.unwrap() == 0x11223344 } },
+        DefaultInstructionMeter {},
+        3
     );
 }
 
@@ -440,7 +488,9 @@ fn test_vm_jit_be32_high() {
         exit",
         [0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88],
         (),
-        { |res: ExecResult| { res.unwrap() == 0x11223344 } }
+        { |res: ExecResult| { res.unwrap() == 0x11223344 } },
+        DefaultInstructionMeter {},
+        3
     );
 }
 
@@ -453,7 +503,9 @@ fn test_vm_jit_be64() {
         exit",
         [0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88],
         (),
-        { |res: ExecResult| { res.unwrap() == 0x1122334455667788 } }
+        { |res: ExecResult| { res.unwrap() == 0x1122334455667788 } },
+        DefaultInstructionMeter {},
+        3
     );
 }
 
@@ -466,7 +518,9 @@ fn test_vm_jit_le16() {
         exit",
         [0x22, 0x11],
         (),
-        { |res: ExecResult| { res.unwrap() == 0x1122 } }
+        { |res: ExecResult| { res.unwrap() == 0x1122 } },
+        DefaultInstructionMeter {},
+        3
     );
 }
 
@@ -479,7 +533,9 @@ fn test_vm_jit_le32() {
         exit",
         [0x44, 0x33, 0x22, 0x11],
         (),
-        { |res: ExecResult| { res.unwrap() == 0x11223344 } }
+        { |res: ExecResult| { res.unwrap() == 0x11223344 } },
+        DefaultInstructionMeter {},
+        3
     );
 }
 
@@ -492,7 +548,9 @@ fn test_vm_jit_le64() {
         exit",
         [0x88, 0x77, 0x66, 0x55, 0x44, 0x33, 0x22, 0x11],
         (),
-        { |res: ExecResult| { res.unwrap() == 0x1122334455667788 } }
+        { |res: ExecResult| { res.unwrap() == 0x1122334455667788 } },
+        DefaultInstructionMeter {},
+        3
     );
 }
 
@@ -505,7 +563,9 @@ fn test_vm_jit_mul32_imm() {
         exit",
         [],
         (),
-        { |res: ExecResult| { res.unwrap() == 0xc } }
+        { |res: ExecResult| { res.unwrap() == 0xc } },
+        DefaultInstructionMeter {},
+        3
     );
 }
 
@@ -519,7 +579,9 @@ fn test_vm_jit_mul32_reg() {
         exit",
         [],
         (),
-        { |res: ExecResult| { res.unwrap() == 0xc } }
+        { |res: ExecResult| { res.unwrap() == 0xc } },
+        DefaultInstructionMeter {},
+        4
     );
 }
 
@@ -533,7 +595,9 @@ fn test_vm_jit_mul32_reg_overflow() {
         exit",
         [],
         (),
-        { |res: ExecResult| { res.unwrap() == 0x4 } }
+        { |res: ExecResult| { res.unwrap() == 0x4 } },
+        DefaultInstructionMeter {},
+        4
     );
 }
 
@@ -546,7 +610,9 @@ fn test_vm_jit_mul64_imm() {
         exit",
         [],
         (),
-        { |res: ExecResult| { res.unwrap() == 0x100000004 } }
+        { |res: ExecResult| { res.unwrap() == 0x100000004 } },
+        DefaultInstructionMeter {},
+        3
     );
 }
 
@@ -560,7 +626,9 @@ fn test_vm_jit_mul64_reg() {
         exit",
         [],
         (),
-        { |res: ExecResult| { res.unwrap() == 0x100000004 } }
+        { |res: ExecResult| { res.unwrap() == 0x100000004 } },
+        DefaultInstructionMeter {},
+        4
     );
 }
 
@@ -574,7 +642,9 @@ fn test_vm_jit_div32_high_divisor() {
         exit",
         [],
         (),
-        { |res: ExecResult| { res.unwrap() == 0x3 } }
+        { |res: ExecResult| { res.unwrap() == 0x3 } },
+        DefaultInstructionMeter {},
+        4
     );
 }
 
@@ -587,7 +657,9 @@ fn test_vm_jit_div32_imm() {
         exit",
         [],
         (),
-        { |res: ExecResult| { res.unwrap() == 0x3 } }
+        { |res: ExecResult| { res.unwrap() == 0x3 } },
+        DefaultInstructionMeter {},
+        3
     );
 }
 
@@ -601,7 +673,9 @@ fn test_vm_jit_div32_reg() {
         exit",
         [],
         (),
-        { |res: ExecResult| { res.unwrap() == 0x3 } }
+        { |res: ExecResult| { res.unwrap() == 0x3 } },
+        DefaultInstructionMeter {},
+        4
     );
 }
 
@@ -615,7 +689,9 @@ fn test_vm_jit_div64_imm() {
         exit",
         [],
         (),
-        { |res: ExecResult| { res.unwrap() == 0x300000000 } }
+        { |res: ExecResult| { res.unwrap() == 0x300000000 } },
+        DefaultInstructionMeter {},
+        4
     );
 }
 
@@ -630,7 +706,9 @@ fn test_vm_jit_div64_reg() {
         exit",
         [],
         (),
-        { |res: ExecResult| { res.unwrap() == 0x300000000 } }
+        { |res: ExecResult| { res.unwrap() == 0x300000000 } },
+        DefaultInstructionMeter {},
+        5
     );
 }
 
@@ -644,7 +722,9 @@ fn test_vm_jit_err_div64_by_zero_reg() {
         exit",
         [],
         (),
-        { |res: ExecResult| matches!(res.unwrap_err(), EbpfError::DivideByZero(pc) if pc == 31) }
+        { |res: ExecResult| matches!(res.unwrap_err(), EbpfError::DivideByZero(pc) if pc == 31) },
+        DefaultInstructionMeter {},
+        3
     );
 }
 
@@ -658,7 +738,9 @@ fn test_vm_jit_err_div_by_zero_reg() {
         exit",
         [],
         (),
-        { |res: ExecResult| matches!(res.unwrap_err(), EbpfError::DivideByZero(pc) if pc == 31) }
+        { |res: ExecResult| matches!(res.unwrap_err(), EbpfError::DivideByZero(pc) if pc == 31) },
+        DefaultInstructionMeter {},
+        3
     );
 }
 
@@ -673,7 +755,9 @@ fn test_vm_jit_mod32() {
         exit",
         [],
         (),
-        { |res: ExecResult| { res.unwrap() == 0x5 } }
+        { |res: ExecResult| { res.unwrap() == 0x5 } },
+        DefaultInstructionMeter {},
+        5
     );
 }
 
@@ -686,7 +770,9 @@ fn test_vm_jit_mod32_imm() {
         exit",
         [],
         (),
-        { |res: ExecResult| { res.unwrap() == 0x0 } }
+        { |res: ExecResult| { res.unwrap() == 0x0 } },
+        DefaultInstructionMeter {},
+        3
     );
 }
 
@@ -705,7 +791,9 @@ fn test_vm_jit_mod64() {
         exit",
         [],
         (),
-        { |res: ExecResult| { res.unwrap() == 0x30ba5a04 } }
+        { |res: ExecResult| { res.unwrap() == 0x30ba5a04 } },
+        DefaultInstructionMeter {},
+        9
     );
 }
 
@@ -719,7 +807,9 @@ fn test_vm_jit_err_mod64_by_zero_reg() {
         exit",
         [],
         (),
-        { |res: ExecResult| matches!(res.unwrap_err(), EbpfError::DivideByZero(pc) if pc == 31) }
+        { |res: ExecResult| matches!(res.unwrap_err(), EbpfError::DivideByZero(pc) if pc == 31) },
+        DefaultInstructionMeter {},
+        3
     );
 }
 
@@ -733,7 +823,9 @@ fn test_vm_jit_err_mod_by_zero_reg() {
         exit",
         [],
         (),
-        { |res: ExecResult| matches!(res.unwrap_err(), EbpfError::DivideByZero(pc) if pc == 31) }
+        { |res: ExecResult| matches!(res.unwrap_err(), EbpfError::DivideByZero(pc) if pc == 31) },
+        DefaultInstructionMeter {},
+        3
     );
 }
 
@@ -750,7 +842,9 @@ fn test_vm_jit_ldabsb() {
             0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff, //
         ],
         (),
-        { |res: ExecResult| { res.unwrap() == 0x33 } }
+        { |res: ExecResult| { res.unwrap() == 0x33 } },
+        DefaultInstructionMeter {},
+        2
     );
 }
 
@@ -765,7 +859,9 @@ fn test_vm_jit_ldabsh() {
             0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff, //
         ],
         (),
-        { |res: ExecResult| { res.unwrap() == 0x4433 } }
+        { |res: ExecResult| { res.unwrap() == 0x4433 } },
+        DefaultInstructionMeter {},
+        2
     );
 }
 
@@ -780,7 +876,9 @@ fn test_vm_jit_ldabsw() {
             0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff, //
         ],
         (),
-        { |res: ExecResult| { res.unwrap() == 0x66554433 } }
+        { |res: ExecResult| { res.unwrap() == 0x66554433 } },
+        DefaultInstructionMeter {},
+        2
     );
 }
 
@@ -795,7 +893,9 @@ fn test_vm_jit_ldabsdw() {
             0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff, //
         ],
         (),
-        { |res: ExecResult| { res.unwrap() == 0xaa99887766554433 } }
+        { |res: ExecResult| { res.unwrap() == 0xaa99887766554433 } },
+        DefaultInstructionMeter {},
+        2
     );
 }
 
@@ -817,7 +917,9 @@ fn test_vm_jit_err_ldabsb_oob() {
                     if access_type == AccessType::Load && pc == 29
                 )
             }
-        }
+        },
+        DefaultInstructionMeter {},
+        1
     );
 }
 
@@ -836,7 +938,9 @@ fn test_vm_jit_err_ldabsb_nomem() {
                     if access_type == AccessType::Load && pc == 29
                 )
             }
-        }
+        },
+        DefaultInstructionMeter {},
+        1
     );
 }
 
@@ -852,7 +956,9 @@ fn test_vm_jit_ldindb() {
             0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff, //
         ],
         (),
-        { |res: ExecResult| { res.unwrap() == 0x88 } }
+        { |res: ExecResult| { res.unwrap() == 0x88 } },
+        DefaultInstructionMeter {},
+        3
     );
 }
 
@@ -868,7 +974,9 @@ fn test_vm_jit_ldindh() {
             0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff, //
         ],
         (),
-        { |res: ExecResult| { res.unwrap() == 0x9988 } }
+        { |res: ExecResult| { res.unwrap() == 0x9988 } },
+        DefaultInstructionMeter {},
+        3
     );
 }
 
@@ -884,7 +992,9 @@ fn test_vm_jit_ldindw() {
             0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff, //
         ],
         (),
-        { |res: ExecResult| { res.unwrap() == 0x88776655 } }
+        { |res: ExecResult| { res.unwrap() == 0x88776655 } },
+        DefaultInstructionMeter {},
+        3
     );
 }
 
@@ -900,7 +1010,9 @@ fn test_vm_jit_ldinddw() {
             0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff, //
         ],
         (),
-        { |res: ExecResult| { res.unwrap() == 0xccbbaa9988776655 } }
+        { |res: ExecResult| { res.unwrap() == 0xccbbaa9988776655 } },
+        DefaultInstructionMeter {},
+        3
     );
 }
 
@@ -923,7 +1035,9 @@ fn test_vm_jit_err_ldindb_oob() {
                     if access_type == AccessType::Load && pc == 30
                 )
             }
-        }
+        },
+        DefaultInstructionMeter {},
+        2
     );
 }
 
@@ -943,7 +1057,9 @@ fn test_vm_jit_err_ldindb_nomem() {
                     if access_type == AccessType::Load && pc == 30
                 )
             }
-        }
+        },
+        DefaultInstructionMeter {},
+        2
     );
 }
 
@@ -955,7 +1071,9 @@ fn test_vm_jit_ldxb() {
         exit",
         [0xaa, 0xbb, 0x11, 0xcc, 0xdd],
         (),
-        { |res: ExecResult| { res.unwrap() == 0x11 } }
+        { |res: ExecResult| { res.unwrap() == 0x11 } },
+        DefaultInstructionMeter {},
+        2
     );
 }
 
@@ -967,7 +1085,9 @@ fn test_vm_jit_ldxh() {
         exit",
         [0xaa, 0xbb, 0x11, 0x22, 0xcc, 0xdd],
         (),
-        { |res: ExecResult| { res.unwrap() == 0x2211 } }
+        { |res: ExecResult| { res.unwrap() == 0x2211 } },
+        DefaultInstructionMeter {},
+        2
     );
 }
 
@@ -981,7 +1101,9 @@ fn test_vm_jit_ldxw() {
             0xaa, 0xbb, 0x11, 0x22, 0x33, 0x44, 0xcc, 0xdd, //
         ],
         (),
-        { |res: ExecResult| { res.unwrap() == 0x44332211 } }
+        { |res: ExecResult| { res.unwrap() == 0x44332211 } },
+        DefaultInstructionMeter {},
+        2
     );
 }
 
@@ -995,7 +1117,9 @@ fn test_vm_jit_ldxh_same_reg() {
         exit",
         [0xff, 0xff],
         (),
-        { |res: ExecResult| { res.unwrap() == 0x1234 } }
+        { |res: ExecResult| { res.unwrap() == 0x1234 } },
+        DefaultInstructionMeter {},
+        4
     );
 }
 
@@ -1010,7 +1134,9 @@ fn test_vm_jit_lldxdw() {
             0x77, 0x88, 0xcc, 0xdd, //
         ],
         (),
-        { |res: ExecResult| { res.unwrap() == 0x8877665544332211 } }
+        { |res: ExecResult| { res.unwrap() == 0x8877665544332211 } },
+        DefaultInstructionMeter {},
+        2
     );
 }
 
@@ -1032,7 +1158,9 @@ fn test_vm_jit_err_ldxdw_oob() {
                     if access_type == AccessType::Load && pc == 29
                 )
             }
-        }
+        },
+        DefaultInstructionMeter {},
+        1
     );
 }
 
@@ -1076,7 +1204,9 @@ fn test_vm_jit_ldxb_all() {
             0x08, 0x09, //
         ],
         (),
-        { |res: ExecResult| { res.unwrap() == 0x9876543210 } }
+        { |res: ExecResult| { res.unwrap() == 0x9876543210 } },
+        DefaultInstructionMeter {},
+        31
     );
 }
 
@@ -1131,7 +1261,9 @@ fn test_vm_jit_ldxh_all() {
             0x00, 0x08, 0x00, 0x09, //
         ],
         (),
-        { |res: ExecResult| { res.unwrap() == 0x9876543210 } }
+        { |res: ExecResult| { res.unwrap() == 0x9876543210 } },
+        DefaultInstructionMeter {},
+        41
     );
 }
 
@@ -1176,7 +1308,9 @@ fn test_vm_jit_ldxh_all2() {
             0x01, 0x00, 0x02, 0x00, //
         ],
         (),
-        { |res: ExecResult| { res.unwrap() == 0x3ff } }
+        { |res: ExecResult| { res.unwrap() == 0x3ff } },
+        DefaultInstructionMeter {},
+        31
     );
 }
 
@@ -1223,7 +1357,9 @@ fn test_vm_jit_ldxw_all() {
             0x00, 0x01, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, //
         ],
         (),
-        { |res: ExecResult| { res.unwrap() == 0x030f0f } }
+        { |res: ExecResult| { res.unwrap() == 0x030f0f } },
+        DefaultInstructionMeter {},
+        31
     );
 }
 
@@ -1235,7 +1371,9 @@ fn test_vm_jit_lddw() {
         exit",
         [],
         (),
-        { |res: ExecResult| { res.unwrap() == 0x1122334455667788 } }
+        { |res: ExecResult| { res.unwrap() == 0x1122334455667788 } },
+        DefaultInstructionMeter {},
+        2
     );
 }
 
@@ -1247,7 +1385,9 @@ fn test_vm_jit_lddw2() {
         exit",
         [],
         (),
-        { |res: ExecResult| { res.unwrap() == 0x80000000 } }
+        { |res: ExecResult| { res.unwrap() == 0x80000000 } },
+        DefaultInstructionMeter {},
+        2
     );
 }
 
@@ -1260,7 +1400,9 @@ fn test_vm_jit_stb() {
         exit",
         [0xaa, 0xbb, 0xff, 0xcc, 0xdd],
         (),
-        { |res: ExecResult| { res.unwrap() == 0x11 } }
+        { |res: ExecResult| { res.unwrap() == 0x11 } },
+        DefaultInstructionMeter {},
+        3
     );
 }
 
@@ -1275,7 +1417,9 @@ fn test_vm_jit_sth() {
             0xaa, 0xbb, 0xff, 0xff, 0xcc, 0xdd, //
         ],
         (),
-        { |res: ExecResult| { res.unwrap() == 0x2211 } }
+        { |res: ExecResult| { res.unwrap() == 0x2211 } },
+        DefaultInstructionMeter {},
+        3
     );
 }
 
@@ -1290,7 +1434,9 @@ fn test_vm_jit_stw() {
             0xaa, 0xbb, 0xff, 0xff, 0xff, 0xff, 0xcc, 0xdd, //
         ],
         (),
-        { |res: ExecResult| { res.unwrap() == 0x44332211 } }
+        { |res: ExecResult| { res.unwrap() == 0x44332211 } },
+        DefaultInstructionMeter {},
+        3
     );
 }
 
@@ -1306,7 +1452,9 @@ fn test_vm_jit_stdw() {
             0xff, 0xff, 0xcc, 0xdd, //
         ],
         (),
-        { |res: ExecResult| { res.unwrap() == 0x44332211 } }
+        { |res: ExecResult| { res.unwrap() == 0x44332211 } },
+        DefaultInstructionMeter {},
+        3
     );
 }
 
@@ -1322,7 +1470,9 @@ fn test_vm_jit_stxb() {
             0xaa, 0xbb, 0xff, 0xcc, 0xdd, //
         ],
         (),
-        { |res: ExecResult| { res.unwrap() == 0x11 } }
+        { |res: ExecResult| { res.unwrap() == 0x11 } },
+        DefaultInstructionMeter {},
+        4
     );
 }
 
@@ -1338,7 +1488,9 @@ fn test_vm_jit_stxh() {
             0xaa, 0xbb, 0xff, 0xff, 0xcc, 0xdd, //
         ],
         (),
-        { |res: ExecResult| { res.unwrap() == 0x2211 } }
+        { |res: ExecResult| { res.unwrap() == 0x2211 } },
+        DefaultInstructionMeter {},
+        4
     );
 }
 
@@ -1354,7 +1506,9 @@ fn test_vm_jit_stxw() {
             0xaa, 0xbb, 0xff, 0xff, 0xff, 0xff, 0xcc, 0xdd, //
         ],
         (),
-        { |res: ExecResult| { res.unwrap() == 0x44332211 } }
+        { |res: ExecResult| { res.unwrap() == 0x44332211 } },
+        DefaultInstructionMeter {},
+        4
     );
 }
 
@@ -1373,7 +1527,9 @@ fn test_vm_jit_stxdw() {
             0xff, 0xff, 0xcc, 0xdd, //
         ],
         (),
-        { |res: ExecResult| { res.unwrap() == 0x8877665544332211 } }
+        { |res: ExecResult| { res.unwrap() == 0x8877665544332211 } },
+        DefaultInstructionMeter {},
+        6
     );
 }
 
@@ -1404,7 +1560,9 @@ fn test_vm_jit_stxb_all() {
             0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, //
         ],
         (),
-        { |res: ExecResult| { res.unwrap() == 0xf0f2f3f4f5f6f7f8 } }
+        { |res: ExecResult| { res.unwrap() == 0xf0f2f3f4f5f6f7f8 } },
+        DefaultInstructionMeter {},
+        19
     );
 }
 
@@ -1422,7 +1580,9 @@ fn test_vm_jit_stxb_all2() {
         exit",
         [0xff, 0xff],
         (),
-        { |res: ExecResult| { res.unwrap() == 0xf1f9 } }
+        { |res: ExecResult| { res.unwrap() == 0xf1f9 } },
+        DefaultInstructionMeter {},
+        8
     );
 }
 
@@ -1456,11 +1616,26 @@ fn test_vm_jit_stxb_chain() {
             0x00, 0x00, //
         ],
         (),
-        { |res: ExecResult| { res.unwrap() == 0x2a } }
+        { |res: ExecResult| { res.unwrap() == 0x2a } },
+        DefaultInstructionMeter {},
+        21
     );
 }
 
 // BPF_JMP : Branches
+
+#[test]
+fn test_vm_jit_exit_without_value() {
+    test_vm_and_jit_asm!(
+        "
+        exit",
+        [],
+        (),
+        { |res: ExecResult| { res.unwrap() == 0x0 } },
+        DefaultInstructionMeter {},
+        1
+    );
+}
 
 #[test]
 fn test_vm_jit_exit() {
@@ -1470,7 +1645,9 @@ fn test_vm_jit_exit() {
         exit",
         [],
         (),
-        { |res: ExecResult| { res.unwrap() == 0x0 } }
+        { |res: ExecResult| { res.unwrap() == 0x0 } },
+        DefaultInstructionMeter {},
+        2
     );
 }
 
@@ -1484,7 +1661,9 @@ fn test_vm_jit_early_exit() {
         exit",
         [],
         (),
-        { |res: ExecResult| { res.unwrap() == 0x3 } }
+        { |res: ExecResult| { res.unwrap() == 0x3 } },
+        DefaultInstructionMeter {},
+        2
     );
 }
 
@@ -1498,7 +1677,9 @@ fn test_vm_jit_ja() {
         exit",
         [],
         (),
-        { |res: ExecResult| { res.unwrap() == 0x1 } }
+        { |res: ExecResult| { res.unwrap() == 0x1 } },
+        DefaultInstructionMeter {},
+        3
     );
 }
 
@@ -1516,7 +1697,9 @@ fn test_vm_jit_jeq_imm() {
         exit",
         [],
         (),
-        { |res: ExecResult| { res.unwrap() == 0x1 } }
+        { |res: ExecResult| { res.unwrap() == 0x1 } },
+        DefaultInstructionMeter {},
+        7
     );
 }
 
@@ -1535,7 +1718,9 @@ fn test_vm_jit_jeq_reg() {
         exit",
         [],
         (),
-        { |res: ExecResult| { res.unwrap() == 0x1 } }
+        { |res: ExecResult| { res.unwrap() == 0x1 } },
+        DefaultInstructionMeter {},
+        8
     );
 }
 
@@ -1553,7 +1738,9 @@ fn test_vm_jit_jge_imm() {
         exit",
         [],
         (),
-        { |res: ExecResult| { res.unwrap() == 0x1 } }
+        { |res: ExecResult| { res.unwrap() == 0x1 } },
+        DefaultInstructionMeter {},
+        7
     );
 }
 
@@ -1572,7 +1759,9 @@ fn test_vm_jit_jge_reg() {
         exit",
         [],
         (),
-        { |res: ExecResult| { res.unwrap() == 0x1 } }
+        { |res: ExecResult| { res.unwrap() == 0x1 } },
+        DefaultInstructionMeter {},
+        8
     );
 }
 
@@ -1591,7 +1780,9 @@ fn test_vm_jit_jle_imm() {
         exit",
         [],
         (),
-        { |res: ExecResult| { res.unwrap() == 0x1 } }
+        { |res: ExecResult| { res.unwrap() == 0x1 } },
+        DefaultInstructionMeter {},
+        7
     );
 }
 
@@ -1612,7 +1803,9 @@ fn test_vm_jit_jle_reg() {
         exit",
         [],
         (),
-        { |res: ExecResult| { res.unwrap() == 0x1 } }
+        { |res: ExecResult| { res.unwrap() == 0x1 } },
+        DefaultInstructionMeter {},
+        9
     );
 }
 
@@ -1630,7 +1823,9 @@ fn test_vm_jit_jgt_imm() {
         exit",
         [],
         (),
-        { |res: ExecResult| { res.unwrap() == 0x1 } }
+        { |res: ExecResult| { res.unwrap() == 0x1 } },
+        DefaultInstructionMeter {},
+        7
     );
 }
 
@@ -1650,7 +1845,9 @@ fn test_vm_jit_jgt_reg() {
         exit",
         [],
         (),
-        { |res: ExecResult| { res.unwrap() == 0x1 } }
+        { |res: ExecResult| { res.unwrap() == 0x1 } },
+        DefaultInstructionMeter {},
+        9
     );
 }
 
@@ -1668,7 +1865,9 @@ fn test_vm_jit_jlt_imm() {
         exit",
         [],
         (),
-        { |res: ExecResult| { res.unwrap() == 0x1 } }
+        { |res: ExecResult| { res.unwrap() == 0x1 } },
+        DefaultInstructionMeter {},
+        7
     );
 }
 
@@ -1688,7 +1887,9 @@ fn test_vm_jit_jlt_reg() {
         exit",
         [],
         (),
-        { |res: ExecResult| { res.unwrap() == 0x1 } }
+        { |res: ExecResult| { res.unwrap() == 0x1 } },
+        DefaultInstructionMeter {},
+        9
     );
 }
 
@@ -1706,7 +1907,9 @@ fn test_vm_jit_jne_imm() {
         exit",
         [],
         (),
-        { |res: ExecResult| { res.unwrap() == 0x1 } }
+        { |res: ExecResult| { res.unwrap() == 0x1 } },
+        DefaultInstructionMeter {},
+        7
     );
 }
 
@@ -1725,7 +1928,9 @@ fn test_vm_jit_jne_reg() {
         exit",
         [],
         (),
-        { |res: ExecResult| { res.unwrap() == 0x1 } }
+        { |res: ExecResult| { res.unwrap() == 0x1 } },
+        DefaultInstructionMeter {},
+        8
     );
 }
 
@@ -1743,7 +1948,9 @@ fn test_vm_jit_jset_imm() {
         exit",
         [],
         (),
-        { |res: ExecResult| { res.unwrap() == 0x1 } }
+        { |res: ExecResult| { res.unwrap() == 0x1 } },
+        DefaultInstructionMeter {},
+        7
     );
 }
 
@@ -1762,7 +1969,9 @@ fn test_vm_jit_jset_reg() {
         exit",
         [],
         (),
-        { |res: ExecResult| { res.unwrap() == 0x1 } }
+        { |res: ExecResult| { res.unwrap() == 0x1 } },
+        DefaultInstructionMeter {},
+        8
     );
 }
 
@@ -1781,7 +1990,9 @@ fn test_vm_jit_jsge_imm() {
         exit",
         [],
         (),
-        { |res: ExecResult| { res.unwrap() == 0x1 } }
+        { |res: ExecResult| { res.unwrap() == 0x1 } },
+        DefaultInstructionMeter {},
+        8
     );
 }
 
@@ -1802,7 +2013,9 @@ fn test_vm_jit_jsge_reg() {
         exit",
         [],
         (),
-        { |res: ExecResult| { res.unwrap() == 0x1 } }
+        { |res: ExecResult| { res.unwrap() == 0x1 } },
+        DefaultInstructionMeter {},
+        10
     );
 }
 
@@ -1821,7 +2034,9 @@ fn test_vm_jit_jsle_imm() {
         exit",
         [],
         (),
-        { |res: ExecResult| { res.unwrap() == 0x1 } }
+        { |res: ExecResult| { res.unwrap() == 0x1 } },
+        DefaultInstructionMeter {},
+        7
     );
 }
 
@@ -1843,7 +2058,9 @@ fn test_vm_jit_jsle_reg() {
         exit",
         [],
         (),
-        { |res: ExecResult| { res.unwrap() == 0x1 } }
+        { |res: ExecResult| { res.unwrap() == 0x1 } },
+        DefaultInstructionMeter {},
+        10
     );
 }
 
@@ -1861,7 +2078,9 @@ fn test_vm_jit_jsgt_imm() {
         exit",
         [],
         (),
-        { |res: ExecResult| { res.unwrap() == 0x1 } }
+        { |res: ExecResult| { res.unwrap() == 0x1 } },
+        DefaultInstructionMeter {},
+        7
     );
 }
 
@@ -1880,7 +2099,9 @@ fn test_vm_jit_jsgt_reg() {
         exit",
         [],
         (),
-        { |res: ExecResult| { res.unwrap() == 0x1 } }
+        { |res: ExecResult| { res.unwrap() == 0x1 } },
+        DefaultInstructionMeter {},
+        8
     );
 }
 
@@ -1898,7 +2119,9 @@ fn test_vm_jit_jslt_imm() {
         exit",
         [],
         (),
-        { |res: ExecResult| { res.unwrap() == 0x1 } }
+        { |res: ExecResult| { res.unwrap() == 0x1 } },
+        DefaultInstructionMeter {},
+        7
     );
 }
 
@@ -1918,7 +2141,9 @@ fn test_vm_jit_jslt_reg() {
         exit",
         [],
         (),
-        { |res: ExecResult| { res.unwrap() == 0x1 } }
+        { |res: ExecResult| { res.unwrap() == 0x1 } },
+        DefaultInstructionMeter {},
+        9
     );
 }
 
@@ -1939,7 +2164,9 @@ fn test_vm_jit_stack1() {
         exit",
         [],
         (),
-        { |res: ExecResult| { res.unwrap() == 0xcd } }
+        { |res: ExecResult| { res.unwrap() == 0xcd } },
+        DefaultInstructionMeter {},
+        9
     );
 }
 
@@ -1968,7 +2195,9 @@ fn test_vm_jit_stack2() {
             0 => Syscall::Function(syscalls::gather_bytes),
             1 => Syscall::Function(syscalls::memfrob),
         ),
-        { |res: ExecResult| { res.unwrap() == 0x01020304 } }
+        { |res: ExecResult| { res.unwrap() == 0x01020304 } },
+        DefaultInstructionMeter {},
+        16
     );
 }
 
@@ -2008,7 +2237,9 @@ fn test_vm_jit_string_stack() {
         (
             0 => Syscall::Function(syscalls::strcmp),
         ),
-        { |res: ExecResult| { res.unwrap() == 0x0 } }
+        { |res: ExecResult| { res.unwrap() == 0x0 } },
+        DefaultInstructionMeter {},
+        28
     );
 }
 
@@ -2027,7 +2258,9 @@ fn test_vm_jit_err_stack_out_of_bound() {
                     if access_type == AccessType::Store && pc == 29
                 )
             }
-        }
+        },
+        DefaultInstructionMeter {},
+        1
     );
 }
 
@@ -2041,7 +2274,9 @@ fn test_vm_jit_relative_call() {
         (
             hash_symbol_name(b"log") => Syscall::Function(bpf_syscall_string),
         ),
-        { |res: ExecResult| { res.unwrap() == 2 } }
+        { |res: ExecResult| { res.unwrap() == 2 } },
+        DefaultInstructionMeter {},
+        14
     );
 }
 
@@ -2053,15 +2288,22 @@ fn test_vm_jit_bpf_to_bpf_scratch_registers() {
         (
             hash_symbol_name(b"log_64") => Syscall::Function(bpf_syscall_u64),
         ),
-        { |res: ExecResult| { res.unwrap() == 112 } }
+        { |res: ExecResult| { res.unwrap() == 112 } },
+        DefaultInstructionMeter {},
+        41
     );
 }
 
 #[test]
 fn test_vm_jit_bpf_to_bpf_pass_stack_reference() {
-    test_vm_and_jit_elf!("tests/elfs/pass_stack_reference.so", [], (), {
-        |res: ExecResult| res.unwrap() == 42
-    });
+    test_vm_and_jit_elf!(
+        "tests/elfs/pass_stack_reference.so",
+        [],
+        (),
+        { |res: ExecResult| res.unwrap() == 42 },
+        DefaultInstructionMeter {},
+        29
+    );
 }
 
 #[test]
@@ -2078,7 +2320,9 @@ fn test_vm_jit_syscall_parameter_on_stack() {
         (
             0 => Syscall::Function(bpf_syscall_string),
         ),
-        { |res: ExecResult| { res.unwrap() == 0 } }
+        { |res: ExecResult| { res.unwrap() == 0 } },
+        DefaultInstructionMeter {},
+        6
     );
 }
 
@@ -2096,7 +2340,9 @@ fn test_vm_jit_call_reg() {
         exit",
         [],
         (),
-        { |res: ExecResult| { res.unwrap() == 42 } }
+        { |res: ExecResult| { res.unwrap() == 42 } },
+        DefaultInstructionMeter {},
+        8
     );
 }
 
@@ -2116,7 +2362,9 @@ fn test_vm_jit_err_oob_callx_low() {
                     if pc == 30 && target_pc == 0
                 )
             }
-        }
+        },
+        DefaultInstructionMeter {},
+        2
     );
 }
 
@@ -2137,7 +2385,9 @@ fn test_vm_jit_err_oob_callx_high() {
                     if pc == 31 && target_pc == 0xffffffff00000000
                 )
             }
-        }
+        },
+        DefaultInstructionMeter {},
+        3
     );
 }
 
@@ -2150,7 +2400,9 @@ fn test_vm_jit_bpf_to_bpf_depth() {
             (
                 hash_symbol_name(b"log") => Syscall::Function(bpf_syscall_string),
             ),
-            { |res: ExecResult| { res.unwrap() == 0 } }
+            { |res: ExecResult| { res.unwrap() == 0 } },
+            DefaultInstructionMeter {},
+            if i == 0 { 4 } else { 3 + 10 * i as u64 }
         );
     }
 }
@@ -2170,7 +2422,9 @@ fn test_vm_jit_err_bpf_to_bpf_too_deep() {
                     if pc == 55 && depth == MAX_CALL_DEPTH
                 )
             }
-        }
+        },
+        DefaultInstructionMeter {},
+        176
     );
 }
 
@@ -2193,7 +2447,9 @@ fn test_vm_jit_err_reg_stack_depth() {
                     if pc == 31 && depth == MAX_CALL_DEPTH
                 )
             }
-        }
+        },
+        DefaultInstructionMeter {},
+        60
     );
 }
 
@@ -2223,6 +2479,18 @@ fn test_vm_jit_call_save() {
         { |res: ExecResult| { res.unwrap() == 0 } }
     );
 }*/
+
+const BPF_TRACE_PRINTK_IDX: u32 = 6;
+fn bpf_trace_printf<E: UserDefinedError>(
+    _arg1: u64,
+    _arg2: u64,
+    _arg3: u64,
+    _arg4: u64,
+    _arg5: u64,
+    _memory_mapping: &MemoryMapping,
+) -> Result<u64, EbpfError<E>> {
+    Ok(0)
+}
 
 fn bpf_syscall_string(
     vm_addr: u64,
@@ -2304,7 +2572,9 @@ fn test_vm_jit_err_syscall_string() {
                     if access_type == AccessType::Load && pc == 0
                 )
             }
-        }
+        },
+        DefaultInstructionMeter {},
+        2
     );
 }
 
@@ -2320,7 +2590,9 @@ fn test_vm_jit_syscall_string() {
         (
             0 => Syscall::Function(bpf_syscall_string),
         ),
-        { |res: ExecResult| { res.unwrap() == 0 } }
+        { |res: ExecResult| { res.unwrap() == 0 } },
+        DefaultInstructionMeter {},
+        4
     );
 }
 
@@ -2340,7 +2612,9 @@ fn test_vm_jit_syscall() {
         (
             0 => Syscall::Function(bpf_syscall_u64),
         ),
-        { |res: ExecResult| { res.unwrap() == 0 } }
+        { |res: ExecResult| { res.unwrap() == 0 } },
+        DefaultInstructionMeter {},
+        8
     );
 }
 
@@ -2359,7 +2633,9 @@ fn test_vm_jit_call_gather_bytes() {
         (
             0 => Syscall::Function(syscalls::gather_bytes),
         ),
-        { |res: ExecResult| { res.unwrap() == 0x0102030405 } }
+        { |res: ExecResult| { res.unwrap() == 0x0102030405 } },
+        DefaultInstructionMeter {},
+        7
     );
 }
 
@@ -2380,7 +2656,9 @@ fn test_vm_jit_call_memfrob() {
         (
             0 => Syscall::Function(syscalls::memfrob),
         ),
-        { |res: ExecResult| { res.unwrap() == 0x102292e2f2c0708 } }
+        { |res: ExecResult| { res.unwrap() == 0x102292e2f2c0708 } },
+        DefaultInstructionMeter {},
+        7
     );
 }
 
@@ -2410,7 +2688,9 @@ fn test_vm_jit_syscall_with_context() {
                 *number_ptr = 42;
             }
             res.unwrap() == 0
-        }}
+        }},
+        DefaultInstructionMeter {},
+        8
     );
 }
 
@@ -2425,7 +2705,9 @@ fn test_vm_jit_load_elf() {
             hash_symbol_name(b"log") => Syscall::Function(bpf_syscall_string),
             hash_symbol_name(b"log_64") => Syscall::Function(bpf_syscall_u64),
         ),
-        { |res: ExecResult| { res.unwrap() == 0 } }
+        { |res: ExecResult| { res.unwrap() == 0 } },
+        DefaultInstructionMeter {},
+        11
     );
 }
 
@@ -2437,7 +2719,9 @@ fn test_vm_jit_load_elf_empty_noro() {
         (
             hash_symbol_name(b"log_64") => Syscall::Function(bpf_syscall_u64),
         ),
-        { |res: ExecResult| { res.unwrap() == 0 } }
+        { |res: ExecResult| { res.unwrap() == 0 } },
+        DefaultInstructionMeter {},
+        8
     );
 }
 
@@ -2449,7 +2733,160 @@ fn test_vm_jit_load_elf_empty_rodata() {
         (
             hash_symbol_name(b"log_64") => Syscall::Function(bpf_syscall_u64),
         ),
-        { |res: ExecResult| { res.unwrap() == 0 } }
+        { |res: ExecResult| { res.unwrap() == 0 } },
+        DefaultInstructionMeter {},
+        8
+    );
+}
+
+// Instruction Meter Limit
+
+struct TestInstructionMeter {
+    remaining: u64,
+}
+impl InstructionMeter for TestInstructionMeter {
+    fn consume(&mut self, amount: u64) {
+        if amount > self.remaining {
+            panic!("Execution count exceeded");
+        }
+        self.remaining = self.remaining.saturating_sub(amount);
+    }
+    fn get_remaining(&self) -> u64 {
+        self.remaining
+    }
+}
+
+#[test]
+fn test_vm_jit_instruction_count_syscall() {
+    test_vm_and_jit_asm!(
+        "
+        mov64 r2, 0x5
+        call 0
+        mov64 r0, 0x0
+        exit",
+        [72, 101, 108, 108, 111],
+        (
+            0 => Syscall::Function(bpf_syscall_string),
+        ),
+        { |res: ExecResult| { res.unwrap() == 0 } },
+        TestInstructionMeter { remaining: 4 },
+        4
+    );
+}
+
+#[test]
+fn test_vm_jit_err_instruction_count_syscall_capped() {
+    test_vm_and_jit_asm!(
+        "
+        mov64 r2, 0x5
+        call 0
+        mov64 r0, 0x0
+        exit",
+        [72, 101, 108, 108, 111],
+        (
+            0 => Syscall::Function(bpf_syscall_string),
+        ),
+        {
+            |res: ExecResult| {
+                matches!(res.unwrap_err(),
+                    EbpfError::ExceededMaxInstructions(pc, instruction_count)
+                    if pc == 32 && instruction_count == 3
+                )
+            }
+        },
+        TestInstructionMeter { remaining: 3 },
+        3
+    );
+}
+
+#[test]
+fn test_vm_jit_non_terminate_early() {
+    test_vm_and_jit_asm!(
+        "
+        mov64 r6, 0x0
+        mov64 r1, 0x0
+        mov64 r2, 0x0
+        mov64 r3, 0x0
+        mov64 r4, 0x0
+        mov64 r5, r6
+        call 0x6
+        add64 r6, 0x1
+        ja -0x8
+        exit",
+        [],
+        (),
+        {
+            |res: ExecResult| {
+                matches!(res.unwrap_err(),
+                    EbpfError::ELFError(ELFError::UnresolvedSymbol(a, b, c))
+                    if a == "Unknown" && b == 35 && c == 48
+                )
+            }
+        },
+        TestInstructionMeter { remaining: 100 },
+        7
+    );
+}
+
+#[test]
+fn test_vm_jit_err_non_terminate_capped() {
+    test_vm_and_jit_asm!(
+        "
+        mov64 r6, 0x0
+        mov64 r1, 0x0
+        mov64 r2, 0x0
+        mov64 r3, 0x0
+        mov64 r4, 0x0
+        mov64 r5, r6
+        call 0x6
+        add64 r6, 0x1
+        ja -0x8
+        exit",
+        [],
+        (
+            BPF_TRACE_PRINTK_IDX => Syscall::Function(bpf_trace_printf),
+        ),
+        {
+            |res: ExecResult| {
+                matches!(res.unwrap_err(),
+                    EbpfError::ExceededMaxInstructions(pc, instruction_count)
+                    if pc == 35 && instruction_count == 6
+                )
+            }
+        },
+        TestInstructionMeter { remaining: 6 },
+        6
+    );
+}
+
+#[test]
+fn test_vm_jit_err_non_terminating_capped() {
+    test_vm_and_jit_asm!(
+        "
+        mov64 r6, 0x0
+        mov64 r1, 0x0
+        mov64 r2, 0x0
+        mov64 r3, 0x0
+        mov64 r4, 0x0
+        mov64 r5, r6
+        call 0x6
+        add64 r6, 0x1
+        ja -0x8
+        exit",
+        [],
+        (
+            BPF_TRACE_PRINTK_IDX => Syscall::Function(bpf_trace_printf),
+        ),
+        {
+            |res: ExecResult| {
+                matches!(res.unwrap_err(),
+                    EbpfError::ExceededMaxInstructions(pc, instruction_count)
+                    if pc == 37 && instruction_count == 1000
+                )
+            }
+        },
+        TestInstructionMeter { remaining: 1000 },
+        1000
     );
 }
 
@@ -2469,7 +2906,9 @@ fn test_vm_jit_symbol_relocation() {
         (
             0 => Syscall::Function(bpf_syscall_string),
         ),
-        { |res: ExecResult| { res.unwrap() == 0 } }
+        { |res: ExecResult| { res.unwrap() == 0 } },
+        DefaultInstructionMeter {},
+        6
     );
 }
 
@@ -2484,7 +2923,9 @@ fn test_vm_jit_err_symbol_unresolved() {
         (),
         {
             |res: ExecResult| matches!(res.unwrap_err(), EbpfError::ELFError(ELFError::UnresolvedSymbol(symbol, pc, offset)) if symbol == "Unknown" && pc == 29 && offset == 0)
-        }
+        },
+        DefaultInstructionMeter {},
+        1
     );
 }
 
@@ -2503,7 +2944,9 @@ fn test_vm_jit_err_call_unresolved() {
         (),
         {
             |res: ExecResult| matches!(res.unwrap_err(), EbpfError::ELFError(ELFError::UnresolvedSymbol(symbol, pc, offset)) if symbol == "Unknown" && pc == 34 && offset == 40)
-        }
+        },
+        DefaultInstructionMeter {},
+        6
     );
 }
 
@@ -2517,7 +2960,9 @@ fn test_vm_jit_err_unresolved_elf() {
         ),
         {
             |res: ExecResult| matches!(res.unwrap_err(), EbpfError::ELFError(ELFError::UnresolvedSymbol(symbol, pc, offset)) if symbol == "log_64" && pc == 550 && offset == 4168)
-        }
+        },
+        DefaultInstructionMeter {},
+        9
     );
 }
 
@@ -2539,7 +2984,9 @@ fn test_vm_jit_mul_loop() {
         exit",
         [],
         (),
-        { |res: ExecResult| { res.unwrap() == 0x75db9c97 } }
+        { |res: ExecResult| { res.unwrap() == 0x75db9c97 } },
+        DefaultInstructionMeter {},
+        37
     );
 }
 
@@ -2565,7 +3012,9 @@ fn test_vm_jit_prime() {
         exit",
         [],
         (),
-        { |res: ExecResult| { res.unwrap() == 0x1 } }
+        { |res: ExecResult| { res.unwrap() == 0x1 } },
+        DefaultInstructionMeter {},
+        655
     );
 }
 
@@ -2600,7 +3049,9 @@ fn test_vm_jit_subnet() {
             0x03, 0x00, //
         ],
         (),
-        { |res: ExecResult| { res.unwrap() == 0x1 } }
+        { |res: ExecResult| { res.unwrap() == 0x1 } },
+        DefaultInstructionMeter {},
+        11
     );
 }
 
@@ -2624,7 +3075,9 @@ fn test_vm_jit_tcp_port80_match() {
             0x44, 0x44, 0x44, 0x44, //
         ],
         (),
-        { |res: ExecResult| { res.unwrap() == 0x1 } }
+        { |res: ExecResult| { res.unwrap() == 0x1 } },
+        DefaultInstructionMeter {},
+        17
     );
 }
 
@@ -2648,7 +3101,9 @@ fn test_vm_jit_tcp_port80_nomatch() {
             0x44, 0x44, 0x44, 0x44, //
         ],
         (),
-        { |res: ExecResult| { res.unwrap() == 0x0 } }
+        { |res: ExecResult| { res.unwrap() == 0x0 } },
+        DefaultInstructionMeter {},
+        18
     );
 }
 
@@ -2672,7 +3127,9 @@ fn test_vm_jit_tcp_port80_nomatch_ethertype() {
             0x44, 0x44, 0x44, 0x44, //
         ],
         (),
-        { |res: ExecResult| { res.unwrap() == 0x0 } }
+        { |res: ExecResult| { res.unwrap() == 0x0 } },
+        DefaultInstructionMeter {},
+        7
     );
 }
 
@@ -2696,20 +3153,32 @@ fn test_vm_jit_tcp_port80_nomatch_proto() {
             0x44, 0x44, 0x44, 0x44, //
         ],
         (),
-        { |res: ExecResult| { res.unwrap() == 0x0 } }
+        { |res: ExecResult| { res.unwrap() == 0x0 } },
+        DefaultInstructionMeter {},
+        9
     );
 }
 
 #[test]
 fn test_vm_jit_tcp_sack_match() {
-    test_vm_and_jit_asm!(TCP_SACK_ASM, TCP_SACK_MATCH, (), {
-        |res: ExecResult| res.unwrap() == 0x1
-    });
+    test_vm_and_jit_asm!(
+        TCP_SACK_ASM,
+        TCP_SACK_MATCH,
+        (),
+        { |res: ExecResult| res.unwrap() == 0x1 },
+        DefaultInstructionMeter {},
+        79
+    );
 }
 
 #[test]
 fn test_vm_jit_tcp_sack_nomatch() {
-    test_vm_and_jit_asm!(TCP_SACK_ASM, TCP_SACK_NOMATCH, (), {
-        |res: ExecResult| res.unwrap() == 0x0
-    });
+    test_vm_and_jit_asm!(
+        TCP_SACK_ASM,
+        TCP_SACK_NOMATCH,
+        (),
+        { |res: ExecResult| res.unwrap() == 0x0 },
+        DefaultInstructionMeter {},
+        55
+    );
 }
