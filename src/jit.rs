@@ -119,7 +119,7 @@ const CALLEE_SAVED_REGISTERS: [u8; 6] = [
 ];
 
 // Special registers:
-// RDI Pointer to optional typed return value
+// RDI Instruction meter (BPF pc limit)
 // RBP Stores a constant pointer to original RSP-8
 // R10 Stores a constant pointer to JitProgramArgument
 // R11 Scratch register for offsetting
@@ -485,12 +485,12 @@ fn emit_profile_instruction_count(jit: &mut JitCompiler, target_pc: Option<usize
     if jit.enable_instruction_meter {
         match target_pc {
             Some(target_pc) => {
-                emit_alu(jit, OperationWidth::Bit64, 0x81, 0, RBP, target_pc as i32 - jit.pc as i32 - 1, Some(-8 * (CALLEE_SAVED_REGISTERS.len() + 1) as i32)); // instruction_meter += target_pc - (jit.pc + 1);
+                emit_alu(jit, OperationWidth::Bit64, 0x81, 0, ARGUMENT_REGISTERS[0], target_pc as i32 - jit.pc as i32 - 1, None); // instruction_meter += target_pc - (jit.pc + 1);
             },
             None => { // If no constant target_pc is given, it is expected to be on the stack instead
                 emit_pop(jit, R11);
-                emit_alu(jit, OperationWidth::Bit64, 0x81, 5, RBP, jit.pc as i32 + 1, Some(-8 * (CALLEE_SAVED_REGISTERS.len() + 1) as i32)); // instruction_meter -= jit.pc + 1;
-                emit_alu(jit, OperationWidth::Bit64, 0x01, R11, RBP, jit.pc as i32, Some(-8 * (CALLEE_SAVED_REGISTERS.len() + 1) as i32)); // instruction_meter += target_pc;
+                emit_alu(jit, OperationWidth::Bit64, 0x81, 5, ARGUMENT_REGISTERS[0], jit.pc as i32 + 1, None); // instruction_meter -= jit.pc + 1;
+                emit_alu(jit, OperationWidth::Bit64, 0x01, R11, ARGUMENT_REGISTERS[0], jit.pc as i32, None); // instruction_meter += target_pc;
             },
         }
     }
@@ -499,8 +499,7 @@ fn emit_profile_instruction_count(jit: &mut JitCompiler, target_pc: Option<usize
 #[inline]
 fn emit_validate_and_profile_instruction_count(jit: &mut JitCompiler, target_pc: Option<usize>) {
     if jit.enable_instruction_meter {
-        emit_load(jit, OperandSize::S64, RBP, R11, -8 * (CALLEE_SAVED_REGISTERS.len() + 1) as i32);
-        emit_cmp_imm32(jit, R11, jit.pc as i32 + 1, None);
+        emit_cmp_imm32(jit, ARGUMENT_REGISTERS[0], jit.pc as i32 + 1, None);
         emit_jcc(jit, 0x82, TARGET_PC_CALL_EXCEEDED_MAX_INSTRUCTIONS);
         emit_profile_instruction_count(jit, target_pc);
     }
@@ -509,7 +508,7 @@ fn emit_validate_and_profile_instruction_count(jit: &mut JitCompiler, target_pc:
 #[inline]
 fn emit_undo_profile_instruction_count(jit: &mut JitCompiler, target_pc: usize) {
     if jit.enable_instruction_meter {
-        emit_alu(jit, OperationWidth::Bit64, 0x81, 0, RBP, jit.pc as i32 + 1 - target_pc as i32, Some(-8 * (CALLEE_SAVED_REGISTERS.len() + 1) as i32)); // instruction_meter += (jit.pc + 1) - target_pc;
+        emit_alu(jit, OperationWidth::Bit64, 0x81, 0, ARGUMENT_REGISTERS[0], jit.pc as i32 + 1 - target_pc as i32, None); // instruction_meter += (jit.pc + 1) - target_pc;
     }
 }
 
@@ -517,7 +516,7 @@ fn emit_undo_profile_instruction_count(jit: &mut JitCompiler, target_pc: usize) 
 fn emit_profile_instruction_count_of_exception(jit: &mut JitCompiler) {
     emit_alu(jit, OperationWidth::Bit64, 0x81, 0, R11, 1, None);
     if jit.enable_instruction_meter {
-        emit_alu(jit, OperationWidth::Bit64, 0x29, R11, RBP, 0, Some(-8 * (CALLEE_SAVED_REGISTERS.len() + 1) as i32)); // instruction_meter -= pc + 1;
+        emit_alu(jit, OperationWidth::Bit64, 0x29, R11, ARGUMENT_REGISTERS[0], 0, None); // instruction_meter -= pc + 1;
     }
 }
 
@@ -676,6 +675,9 @@ fn emit_rust_call(jit: &mut JitCompiler, function: *const u8, arguments: &[Argum
         }
     }
 
+    // Load pointer to optional typed return value
+    emit_load(jit, OperandSize::S64, RBP, ARGUMENT_REGISTERS[0], -8 * (CALLEE_SAVED_REGISTERS.len() + 1) as i32);
+
     // TODO use direct call when possible
     emit_load_imm(jit, RAX, function as i64);
     // callq *%rax
@@ -688,7 +690,8 @@ fn emit_rust_call(jit: &mut JitCompiler, function: *const u8, arguments: &[Argum
     }
 
     // Test if result indicates that an error occured
-    emit_cmp_imm32(jit, RDI, 0, Some(0));
+    emit_load(jit, OperandSize::S64, RBP, R11, -8 * (CALLEE_SAVED_REGISTERS.len() + 1) as i32);
+    emit_cmp_imm32(jit, R11, 0, Some(0));
 }
 
 #[inline]
@@ -705,7 +708,8 @@ fn emit_address_translation(jit: &mut JitCompiler, host_addr: u8, vm_addr: Value
     emit_jcc(jit, 0x85, TARGET_PC_EXCEPTION_AT);
 
     // Store Ok value in result register
-    emit_load(jit, OperandSize::S64, RDI, host_addr, 8);
+    emit_load(jit, OperandSize::S64, RBP, R11, -8 * (CALLEE_SAVED_REGISTERS.len() + 1) as i32);
+    emit_load(jit, OperandSize::S64, R11, host_addr, 8);
 }
 
 fn muldivmod(jit: &mut JitCompiler, opc: u8, src: u8, dst: u8, imm: i32) {
@@ -778,7 +782,7 @@ fn muldivmod(jit: &mut JitCompiler, opc: u8, src: u8, dst: u8, imm: i32) {
 fn set_exception_kind<E: UserDefinedError>(jit: &mut JitCompiler, err: EbpfError<E>) {
     let err = Result::<u64, EbpfError<E>>::Err(err);
     let err_kind = unsafe { *(&err as *const _ as *const u64).offset(1) };
-    emit_store_imm32(jit, OperandSize::S64, RDI, 8, err_kind as i32);
+    emit_store_imm32(jit, OperandSize::S64, R10, 8, err_kind as i32);
 }
 
 #[derive(Debug)]
@@ -845,9 +849,11 @@ impl<'a> JitCompiler<'a> {
         emit_load_imm(self, REGISTER_MAP[STACK_REG], MM_STACK_START as i64 + CALL_FRAME_SIZE as i64);
         emit_push(self, REGISTER_MAP[STACK_REG]);
 
+        // Save pointer to optional typed return value
+        emit_push(self, ARGUMENT_REGISTERS[0]);
+
         // Initialize instruction meter
-        emit_load(self, OperandSize::S64, R10, ARGUMENT_REGISTERS[3], std::mem::size_of::<MemoryMapping>() as i32);
-        emit_push(self, ARGUMENT_REGISTERS[3]);
+        emit_load(self, OperandSize::S64, R10, ARGUMENT_REGISTERS[0], std::mem::size_of::<MemoryMapping>() as i32);
 
         // Initialize other registers
         for reg in REGISTER_MAP.iter() {
@@ -1148,7 +1154,8 @@ impl<'a> JitCompiler<'a> {
                         emit_jcc(self, 0x85, TARGET_PC_SYSCALL_EXCEPTION);
 
                         // Store Ok value in result register
-                        emit_load(self, OperandSize::S64, RDI, REGISTER_MAP[0], 8);
+                        emit_load(self, OperandSize::S64, RBP, R11, -8 * (CALLEE_SAVED_REGISTERS.len() + 1) as i32);
+                        emit_load(self, OperandSize::S64, R11, REGISTER_MAP[0], 8);
                     } else {
                         match executable.lookup_bpf_call(insn.imm as u32) {
                             Some(target_pc) => {
@@ -1188,34 +1195,40 @@ impl<'a> JitCompiler<'a> {
 
         // Handler for EbpfError::ExceededMaxInstructions
         set_anchor(self, TARGET_PC_CALL_EXCEEDED_MAX_INSTRUCTIONS);
-        set_exception_kind::<E>(self, EbpfError::ExceededMaxInstructions(0, 0));
+        emit_mov(self, ARGUMENT_REGISTERS[0], R11);
         emit_load(self, OperandSize::S64, R10, REGISTER_MAP[0], std::mem::size_of::<MemoryMapping>() as i32);
-        emit_store(self, OperandSize::S64, REGISTER_MAP[0], RDI, 24); // total_insn_count = initial_instruction_meter;
+        emit_load(self, OperandSize::S64, RBP, R10, -8 * (CALLEE_SAVED_REGISTERS.len() + 1) as i32);
+        emit_store(self, OperandSize::S64, REGISTER_MAP[0], R10, 24); // total_insn_count = initial_instruction_meter;
+        set_exception_kind::<E>(self, EbpfError::ExceededMaxInstructions(0, 0));
         emit_jmp(self, TARGET_PC_EXCEPTION_AT);
 
         // Handler for EbpfError::CallDepthExceeded
         set_anchor(self, TARGET_PC_CALL_DEPTH_EXCEEDED);
+        emit_load(self, OperandSize::S64, RBP, R10, -8 * (CALLEE_SAVED_REGISTERS.len() + 1) as i32);
+        emit_store_imm32(self, OperandSize::S64, R10, 24, MAX_CALL_DEPTH as i32); // depth = MAX_CALL_DEPTH;
         set_exception_kind::<E>(self, EbpfError::CallDepthExceeded(0, 0));
-        emit_store_imm32(self, OperandSize::S64, RDI, 24, MAX_CALL_DEPTH as i32); // depth = MAX_CALL_DEPTH;
         emit_jmp(self, TARGET_PC_EXCEPTION_AT);
 
         // Handler for EbpfError::CallOutsideTextSegment
         set_anchor(self, TARGET_PC_CALL_OUTSIDE_TEXT_SEGMENT);
+        emit_load(self, OperandSize::S64, RBP, R10, -8 * (CALLEE_SAVED_REGISTERS.len() + 1) as i32);
+        emit_store(self, OperandSize::S64, REGISTER_MAP[0], R10, 24); // target_address = RAX;
         set_exception_kind::<E>(self, EbpfError::CallOutsideTextSegment(0, 0));
-        emit_store(self, OperandSize::S64, REGISTER_MAP[0], RDI, 24); // target_address = RAX;
         emit_jmp(self, TARGET_PC_EXCEPTION_AT);
 
         // Handler for EbpfError::DivideByZero
         set_anchor(self, TARGET_PC_DIV_BY_ZERO);
+        emit_load(self, OperandSize::S64, RBP, R10, -8 * (CALLEE_SAVED_REGISTERS.len() + 1) as i32);
         set_exception_kind::<E>(self, EbpfError::DivideByZero(0));
         // emit_jmp(self, TARGET_PC_EXCEPTION_AT); // Fall-through
 
         // Handler for exceptions which report their PC
         set_anchor(self, TARGET_PC_EXCEPTION_AT);
         emit_profile_instruction_count_of_exception(self);
-        emit_store_imm32(self, OperandSize::S64, RDI, 0, 1); // is_err = true;
+        emit_load(self, OperandSize::S64, RBP, R10, -8 * (CALLEE_SAVED_REGISTERS.len() + 1) as i32);
+        emit_store_imm32(self, OperandSize::S64, R10, 0, 1); // is_err = true;
         emit_alu(self, OperationWidth::Bit64, 0x81, 0, R11, ebpf::ELF_INSN_DUMP_OFFSET as i32 - 1, None);
-        emit_store(self, OperandSize::S64, R11, RDI, 16); // pc = self.pc + ebpf::ELF_INSN_DUMP_OFFSET;
+        emit_store(self, OperandSize::S64, R11, R10, 16); // pc = self.pc + ebpf::ELF_INSN_DUMP_OFFSET;
         emit_jmp(self, TARGET_PC_EPILOGUE);
 
         // Handler for syscall exceptions
@@ -1225,15 +1238,16 @@ impl<'a> JitCompiler<'a> {
 
         // Quit gracefully
         set_anchor(self, TARGET_PC_EXIT);
-        emit_store(self, OperandSize::S64, REGISTER_MAP[0], RDI, 8); // result.return_value = R0;
+        emit_load(self, OperandSize::S64, RBP, R10, -8 * (CALLEE_SAVED_REGISTERS.len() + 1) as i32);
+        emit_store(self, OperandSize::S64, REGISTER_MAP[0], R10, 8); // result.return_value = R0;
         emit_load_imm(self, REGISTER_MAP[0], 0);
-        emit_store(self, OperandSize::S64, REGISTER_MAP[0], RDI, 0);  // result.is_error = false;
+        emit_store(self, OperandSize::S64, REGISTER_MAP[0], R10, 0);  // result.is_error = false;
 
         // Epilogue
         set_anchor(self, TARGET_PC_EPILOGUE);
 
         // Store instruction_meter in RAX
-        emit_load(self, OperandSize::S64, RBP, RAX, -8 * (CALLEE_SAVED_REGISTERS.len() + 1) as i32);
+        emit_mov(self, ARGUMENT_REGISTERS[0], RAX);
 
         // Restore stack pointer in case the BPF stack was used
         emit_mov(self, RBP, R11);
