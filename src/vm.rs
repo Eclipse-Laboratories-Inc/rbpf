@@ -90,6 +90,32 @@ pub trait Executable<E: UserDefinedError>: Send + Sync {
     fn report_unresolved_symbol(&self, insn_offset: usize) -> Result<(), EbpfError<E>>;
 }
 
+/// Static constructors for Executable
+impl<E: UserDefinedError> dyn Executable<E> {
+    /// Creates a post relocaiton/fixup executable from an ELF file
+    pub fn from_elf<'a>(
+        elf_bytes: &'a [u8],
+        verifier: Option<Verifier<E>>,
+    ) -> Result<Box<Self>, EbpfError<E>> {
+        let ebpf_elf = EBpfElf::load(elf_bytes)?;
+        let (_, bytes) = ebpf_elf.get_text_bytes()?;
+        if let Some(verifier) = verifier {
+            verifier(bytes)?;
+        }
+        Ok(Box::new(ebpf_elf))
+    }
+    /// Creates a post relocaiton/fixup executable from machine code
+    pub fn from_text_bytes<'a>(
+        text_bytes: &'a [u8],
+        verifier: Option<Verifier<E>>,
+    ) -> Result<Box<Self>, EbpfError<E>> {
+        if let Some(verifier) = verifier {
+            verifier(text_bytes)?;
+        }
+        Ok(Box::new(EBpfElf::new_from_text_bytes(text_bytes)))
+    }
+}
+
 /// Instruction meter
 pub trait InstructionMeter {
     /// Consume instructions
@@ -112,7 +138,7 @@ impl InstructionMeter for DefaultInstructionMeter {
 /// # Examples
 ///
 /// ```
-/// use solana_rbpf::{vm::{EbpfVm, DefaultInstructionMeter}, user_error::UserError};
+/// use solana_rbpf::{vm::{Executable, EbpfVm, DefaultInstructionMeter}, user_error::UserError};
 ///
 /// let prog = &[
 ///     0x95, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00  // exit
@@ -122,16 +148,16 @@ impl InstructionMeter for DefaultInstructionMeter {
 /// ];
 ///
 /// // Instantiate a VM.
-/// let executable = EbpfVm::<UserError>::create_executable_from_text_bytes(prog, None).unwrap();
-/// let mut vm = EbpfVm::<UserError>::new(executable.as_ref(), mem, &[]).unwrap();
+/// let executable = Executable::<UserError>::from_text_bytes(prog, None).unwrap();
+/// let mut vm = EbpfVm::<UserError, DefaultInstructionMeter>::new(executable.as_ref(), mem, &[]).unwrap();
 ///
 /// // Provide a reference to the packet data.
 /// let res = vm.execute_program_interpreted(&mut DefaultInstructionMeter {}).unwrap();
 /// assert_eq!(res, 0);
 /// ```
-pub struct EbpfVm<'a, E: UserDefinedError> {
+pub struct EbpfVm<'a, E: UserDefinedError, I: InstructionMeter> {
     executable: &'a dyn Executable<E>,
-    compiled_prog_and_arg: Option<JitProgramAndArgument<E>>,
+    compiled_prog_and_arg: Option<JitProgramAndArgument<E, I>>,
     syscalls: HashMap<u32, Syscall<'a, E>>,
     prog: &'a [u8],
     prog_addr: u64,
@@ -141,28 +167,28 @@ pub struct EbpfVm<'a, E: UserDefinedError> {
     total_insn_count: u64,
 }
 
-impl<'a, E: UserDefinedError> EbpfVm<'a, E> {
+impl<'a, E: UserDefinedError, I: InstructionMeter> EbpfVm<'a, E, I> {
     /// Create a new virtual machine instance, and load an eBPF program into that instance.
     /// When attempting to load the program, it passes through a simple verifier.
     ///
     /// # Examples
     ///
     /// ```
-    /// use solana_rbpf::{vm::EbpfVm, user_error::UserError};
+    /// use solana_rbpf::{vm::{Executable, EbpfVm, DefaultInstructionMeter}, user_error::UserError};
     ///
     /// let prog = &[
     ///     0x95, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00  // exit
     /// ];
     ///
     /// // Instantiate a VM.
-    /// let executable = EbpfVm::<UserError>::create_executable_from_text_bytes(prog, None).unwrap();
-    /// let mut vm = EbpfVm::<UserError>::new(executable.as_ref(), &[], &[]).unwrap();
+    /// let executable = Executable::<UserError>::from_text_bytes(prog, None).unwrap();
+    /// let mut vm = EbpfVm::<UserError, DefaultInstructionMeter>::new(executable.as_ref(), &[], &[]).unwrap();
     /// ```
     pub fn new(
         executable: &'a dyn Executable<E>,
         mem: &[u8],
         granted_regions: &[MemoryRegion],
-    ) -> Result<EbpfVm<'a, E>, EbpfError<E>> {
+    ) -> Result<EbpfVm<'a, E, I>, EbpfError<E>> {
         let frames = CallFrames::default();
         let stack_regions = frames.get_stacks();
         let const_data_regions: Vec<MemoryRegion> =
@@ -200,30 +226,6 @@ impl<'a, E: UserDefinedError> EbpfVm<'a, E> {
         })
     }
 
-    /// Creates a post relocaiton/fixup executable
-    pub fn create_executable_from_elf(
-        elf_bytes: &'a [u8],
-        verifier: Option<Verifier<E>>,
-    ) -> Result<Box<dyn Executable<E>>, EbpfError<E>> {
-        let ebpf_elf = EBpfElf::load(elf_bytes)?;
-        let (_, bytes) = ebpf_elf.get_text_bytes()?;
-        if let Some(verifier) = verifier {
-            verifier(bytes)?;
-        }
-        Ok(Box::new(ebpf_elf))
-    }
-
-    /// Creates a post relocaiton/fixup executable
-    pub fn create_executable_from_text_bytes(
-        text_bytes: &'a [u8],
-        verifier: Option<Verifier<E>>,
-    ) -> Result<Box<dyn Executable<E>>, EbpfError<E>> {
-        if let Some(verifier) = verifier {
-            verifier(text_bytes)?;
-        }
-        Ok(Box::new(EBpfElf::new_from_text_bytes(text_bytes)))
-    }
-
     /// Returns the number of instructions executed by the last program.
     pub fn get_total_instruction_count(&self) -> u64 {
         self.total_insn_count
@@ -239,7 +241,7 @@ impl<'a, E: UserDefinedError> EbpfVm<'a, E> {
     /// # Examples
     ///
     /// ```
-    /// use solana_rbpf::{vm::{EbpfVm, Syscall}, syscalls::bpf_trace_printf, user_error::UserError};
+    /// use solana_rbpf::{vm::{Executable, EbpfVm, Syscall, DefaultInstructionMeter}, syscalls::bpf_trace_printf, user_error::UserError};
     ///
     /// // This program was compiled with clang, from a C program containing the following single
     /// // instruction: `return bpf_trace_printk("foo %c %c %c\n", 10, 1, 2, 3);`
@@ -257,8 +259,8 @@ impl<'a, E: UserDefinedError> EbpfVm<'a, E> {
     /// ];
     ///
     /// // Instantiate a VM.
-    /// let executable = EbpfVm::<UserError>::create_executable_from_text_bytes(prog, None).unwrap();
-    /// let mut vm = EbpfVm::<UserError>::new(executable.as_ref(), &[], &[]).unwrap();
+    /// let executable = Executable::<UserError>::from_text_bytes(prog, None).unwrap();
+    /// let mut vm = EbpfVm::<UserError, DefaultInstructionMeter>::new(executable.as_ref(), &[], &[]).unwrap();
     ///
     /// // Register a syscall.
     /// // On running the program this syscall will print the content of registers r3, r4 and r5 to
@@ -301,7 +303,7 @@ impl<'a, E: UserDefinedError> EbpfVm<'a, E> {
     /// # Examples
     ///
     /// ```
-    /// use solana_rbpf::{vm::{EbpfVm, DefaultInstructionMeter}, user_error::UserError};
+    /// use solana_rbpf::{vm::{Executable, EbpfVm, DefaultInstructionMeter}, user_error::UserError};
     ///
     /// let prog = &[
     ///     0x95, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00  // exit
@@ -311,24 +313,23 @@ impl<'a, E: UserDefinedError> EbpfVm<'a, E> {
     /// ];
     ///
     /// // Instantiate a VM.
-    /// let executable = EbpfVm::<UserError>::create_executable_from_text_bytes(prog, None).unwrap();
-    /// let mut vm = EbpfVm::<UserError>::new(executable.as_ref(), mem, &[]).unwrap();
+    /// let executable = Executable::<UserError>::from_text_bytes(prog, None).unwrap();
+    /// let mut vm = EbpfVm::<UserError, DefaultInstructionMeter>::new(executable.as_ref(), mem, &[]).unwrap();
     ///
     /// // Provide a reference to the packet data.
     /// let res = vm.execute_program_interpreted(&mut DefaultInstructionMeter {}).unwrap();
     /// assert_eq!(res, 0);
     /// ```
-    pub fn execute_program_interpreted<I: InstructionMeter>(
-        &mut self,
-        instruction_meter: &mut I,
-    ) -> ProgramResult<E> {
+    pub fn execute_program_interpreted(&mut self, instruction_meter: &mut I) -> ProgramResult<E> {
+        let initial_insn_count = instruction_meter.get_remaining();
         let result = self.execute_program_interpreted_inner(instruction_meter);
         instruction_meter.consume(self.last_insn_count);
+        self.total_insn_count = initial_insn_count - instruction_meter.get_remaining();
         result
     }
 
     #[rustfmt::skip]
-    fn execute_program_interpreted_inner<I: InstructionMeter>(
+    fn execute_program_interpreted_inner(
         &mut self,
         instruction_meter: &mut I,
     ) -> ProgramResult<E> {
@@ -348,8 +349,8 @@ impl<'a, E: UserDefinedError> EbpfVm<'a, E> {
         let entry = self.executable.get_entrypoint_instruction_offset()?;
         let mut next_pc: usize = entry;
         let mut remaining_insn_count = instruction_meter.get_remaining();
+        let initial_insn_count = remaining_insn_count;
         self.last_insn_count = 0;
-        self.total_insn_count = 0;
         while next_pc * ebpf::INSN_SIZE + ebpf::INSN_SIZE <= self.prog.len() {
             let pc = next_pc;
             next_pc += 1;
@@ -357,12 +358,11 @@ impl<'a, E: UserDefinedError> EbpfVm<'a, E> {
             let dst = insn.dst as usize;
             let src = insn.src as usize;
             self.last_insn_count += 1;
-            self.total_insn_count += 1;
 
             if insn_trace {
                 trace!(
                     "    BPF: {:5?} {:016x?} frame {:?} pc {:4?} {}",
-                    self.total_insn_count,
+                    self.last_insn_count,
                     reg,
                     self.frames.get_frame_index(),
                     pc + ebpf::ELF_INSN_DUMP_OFFSET,
@@ -662,7 +662,7 @@ impl<'a, E: UserDefinedError> EbpfVm<'a, E> {
                             next_pc = Self::check_pc(self.prog_addr, &self.prog, pc, ptr)?;
                         }
                         _ => {
-                            debug!("BPF instructions executed: {:?}", self.total_insn_count);
+                            debug!("BPF instructions executed: {:?}", self.last_insn_count);
                             debug!(
                                 "Max frame depth reached: {:?}",
                                 self.frames.get_max_frame_index()
@@ -674,7 +674,7 @@ impl<'a, E: UserDefinedError> EbpfVm<'a, E> {
                 _ => return Err(EbpfError::UnsupportedInstruction(pc + ebpf::ELF_INSN_DUMP_OFFSET)),
             }
             if self.last_insn_count >= remaining_insn_count {
-                return Err(EbpfError::ExceededMaxInstructions(pc + 1 + ebpf::ELF_INSN_DUMP_OFFSET, self.total_insn_count));
+                return Err(EbpfError::ExceededMaxInstructions(pc + 1 + ebpf::ELF_INSN_DUMP_OFFSET, initial_insn_count));
             }
         }
 
@@ -713,21 +713,21 @@ impl<'a, E: UserDefinedError> EbpfVm<'a, E> {
     /// # Examples
     ///
     /// ```
-    /// use solana_rbpf::{vm::EbpfVm, user_error::UserError};
+    /// use solana_rbpf::{vm::{Executable, EbpfVm, DefaultInstructionMeter}, user_error::UserError};
     ///
     /// let prog = &[
     ///     0x95, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00  // exit
     /// ];
     ///
     /// // Instantiate a VM.
-    /// let executable = EbpfVm::<UserError>::create_executable_from_text_bytes(prog, None).unwrap();
-    /// let mut vm = EbpfVm::<UserError>::new(executable.as_ref(), &[], &[]).unwrap();
+    /// let executable = Executable::<UserError>::from_text_bytes(prog, None).unwrap();
+    /// let mut vm = EbpfVm::<UserError, DefaultInstructionMeter>::new(executable.as_ref(), &[], &[]).unwrap();
     ///
     /// # #[cfg(not(windows))]
     /// vm.jit_compile();
     /// ```
     pub fn jit_compile(&mut self) -> Result<(), EbpfError<E>> {
-        let compiled_prog = jit::compile(self.prog, self.executable, &self.syscalls, true)?;
+        let compiled_prog = jit::compile::<E, I>(self.prog, self.executable, &self.syscalls, true)?;
         let mut jit_arg: Vec<*const u8> = vec![
             std::ptr::null();
             std::mem::size_of::<JitProgramArgument>()
@@ -759,10 +759,7 @@ impl<'a, E: UserDefinedError> EbpfVm<'a, E> {
     ///
     /// For this reason the function should be called from within an `unsafe` bloc.
     ///
-    pub unsafe fn execute_program_jit<I: InstructionMeter>(
-        &mut self,
-        instruction_meter: &mut I,
-    ) -> ProgramResult<E> {
+    pub unsafe fn execute_program_jit(&mut self, instruction_meter: &mut I) -> ProgramResult<E> {
         let reg1 = if self
             .memory_mapping
             .map::<UserError>(AccessType::Store, ebpf::MM_INPUT_START, 1)
@@ -776,19 +773,24 @@ impl<'a, E: UserDefinedError> EbpfVm<'a, E> {
             .compiled_prog_and_arg
             .as_ref()
             .ok_or(EbpfError::JITNotCompiled)?;
-        let remaining_insn_count = instruction_meter.get_remaining();
+        let initial_insn_count = instruction_meter.get_remaining();
         let result: ProgramResult<E> = Ok(0);
-        self.total_insn_count = (remaining_insn_count as i64
-            - (compiled_prog_and_arg.program.main)(
-                &result,
-                reg1,
-                &*(compiled_prog_and_arg.argument.as_ptr() as *const JitProgramArgument),
-                remaining_insn_count,
-            ) as i64) as u64;
-        if self.total_insn_count > remaining_insn_count {
-            self.total_insn_count = remaining_insn_count;
-        }
+        self.last_insn_count = (compiled_prog_and_arg.program.main)(
+            &result,
+            reg1,
+            &*(compiled_prog_and_arg.argument.as_ptr() as *const JitProgramArgument),
+            instruction_meter,
+        )
+        .max(0) as u64;
+        let remaining_insn_count = instruction_meter.get_remaining();
+        self.total_insn_count = remaining_insn_count - self.last_insn_count;
         instruction_meter.consume(self.total_insn_count);
-        result
+        self.total_insn_count += initial_insn_count - remaining_insn_count;
+        match result {
+            Err(EbpfError::ExceededMaxInstructions(pc, _)) => {
+                Err(EbpfError::ExceededMaxInstructions(pc, initial_insn_count))
+            }
+            x => x,
+        }
     }
 }

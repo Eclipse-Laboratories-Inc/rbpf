@@ -22,7 +22,7 @@ use std::fmt::Error as FormatterError;
 use std::ops::{Index, IndexMut};
 
 use crate::{
-    vm::{Executable, Syscall, ProgramResult},
+    vm::{Executable, Syscall, ProgramResult, InstructionMeter},
     call_frames::{CALL_FRAME_SIZE, MAX_CALL_DEPTH},
     ebpf::{self, INSN_SIZE, FIRST_SCRATCH_REG, SCRATCH_REGS, STACK_REG, MM_STACK_START, MM_PROGRAM_START},
     error::{UserDefinedError, EbpfError},
@@ -39,17 +39,17 @@ pub struct JitProgramArgument {
 }
 
 /// eBPF JIT-compiled program
-pub struct JitProgram<E: UserDefinedError> {
+pub struct JitProgram<E: UserDefinedError, I: InstructionMeter> {
     /// Call this with JitProgramArgument to execute the compiled code
-    pub main: unsafe fn(&ProgramResult<E>, u64, &JitProgramArgument, u64) -> u64,
+    pub main: unsafe fn(&ProgramResult<E>, u64, &JitProgramArgument, &mut I) -> i64,
     /// Pointers to the instructions of the compiled code
     pub instruction_addresses: Vec<*const u8>,
 }
 
 /// Combines program and argument for a VM instance
-pub struct JitProgramAndArgument<E: UserDefinedError> {
+pub struct JitProgramAndArgument<E: UserDefinedError, I: InstructionMeter> {
     /// JIT-compiled program
-    pub program: JitProgram<E>,
+    pub program: JitProgram<E, I>,
     /// The argument is actually a JitProgramArgument
     pub argument: Vec<*const u8>,
 }
@@ -545,7 +545,8 @@ fn emit_conditional_branch_imm(jit: &mut JitCompiler, op: u8, imm: i32, dst: u8,
 enum Value {
     Register(u8),
     RegisterPlusConstant(u8, i64),
-    Constant(i64)
+    Constant(i64),
+    Stack(i32)
 }
 
 #[inline]
@@ -634,8 +635,12 @@ struct Argument {
 }
 
 #[inline]
-fn emit_rust_call(jit: &mut JitCompiler, function: *const u8, arguments: &[Argument]) {
+fn emit_rust_call(jit: &mut JitCompiler, function: *const u8, arguments: &[Argument], return_reg: Option<u8>) {
     let mut saved_registers = CALLER_SAVED_REGISTERS.to_vec();
+    if let Some(reg) = return_reg {
+        let dst = saved_registers.iter().position(|x| *x == reg).unwrap();
+        saved_registers.remove(dst);
+    }
 
     // Pass arguments via stack
     for argument in arguments {
@@ -678,17 +683,21 @@ fn emit_rust_call(jit: &mut JitCompiler, function: *const u8, arguments: &[Argum
             Value::Constant(value) => {
                 emit_load_imm(jit, dst, value);
             },
+            Value::Stack(slot) => {
+                emit_load(jit, OperandSize::S64, RBP, dst, -8 * (CALLEE_SAVED_REGISTERS.len() as i32 + slot));
+            },
         }
     }
-
-    // Load pointer to optional typed return value
-    emit_load(jit, OperandSize::S64, RBP, ARGUMENT_REGISTERS[0], -8 * (CALLEE_SAVED_REGISTERS.len() + 1) as i32);
 
     // TODO use direct call when possible
     emit_load_imm(jit, RAX, function as i64);
     // callq *%rax
     emit1(jit, 0xff);
     emit1(jit, 0xd0);
+
+    if let Some(reg) = return_reg {
+        emit_mov(jit, RAX, reg);
+    }
 
     // Restore registers from stack
     for reg in saved_registers.iter().rev() {
@@ -704,10 +713,11 @@ fn emit_rust_call(jit: &mut JitCompiler, function: *const u8, arguments: &[Argum
 fn emit_address_translation(jit: &mut JitCompiler, host_addr: u8, vm_addr: Value, len: u64, access_type: AccessType) {
     emit_rust_call(jit, MemoryMapping::map::<UserError> as *const u8, &[
         Argument { index: 3, value: vm_addr }, // Specify first as the src register could be overwritten by other arguments
+        Argument { index: 0, value: Value::Stack(1) }, // Pointer to optional typed return value
         Argument { index: 1, value: Value::Register(R10) }, // JitProgramArgument::memory_mapping
         Argument { index: 2, value: Value::Constant(access_type as i64) },
         Argument { index: 4, value: Value::Constant(len as i64) },
-    ]);
+    ], None);
 
     // Throw error if the result indicates one
     emit_load_imm(jit, R11, jit.pc as i64);
@@ -788,6 +798,7 @@ fn muldivmod(jit: &mut JitCompiler, opc: u8, src: u8, dst: u8, imm: i32) {
 fn set_exception_kind<E: UserDefinedError>(jit: &mut JitCompiler, err: EbpfError<E>) {
     let err = Result::<u64, EbpfError<E>>::Err(err);
     let err_kind = unsafe { *(&err as *const _ as *const u64).offset(1) };
+    emit_load(jit, OperandSize::S64, RBP, R10, -8 * (CALLEE_SAVED_REGISTERS.len() + 1) as i32);
     emit_store_imm32(jit, OperandSize::S64, R10, 8, err_kind as i32);
 }
 
@@ -837,7 +848,7 @@ impl<'a> JitCompiler<'a> {
         }
     }
 
-    fn compile<E: UserDefinedError>(&mut self, prog: &[u8],
+    fn compile<E: UserDefinedError, I: InstructionMeter>(&mut self, prog: &[u8],
                    executable: &'a dyn Executable<E>,
                    syscalls: &HashMap<u32,  Syscall<'a, E>>) -> Result<(), EbpfError<E>> {
         // Save registers
@@ -859,9 +870,11 @@ impl<'a> JitCompiler<'a> {
         emit_push(self, ARGUMENT_REGISTERS[0]);
 
         // Save initial instruction meter
-        emit_mov(self, ARGUMENT_REGISTERS[3], ARGUMENT_REGISTERS[0]);
+        emit_rust_call(self, I::get_remaining as *const u8, &[
+            Argument { index: 0, value: Value::Register(ARGUMENT_REGISTERS[3]) },
+        ], Some(ARGUMENT_REGISTERS[0]));
         emit_push(self, ARGUMENT_REGISTERS[0]);
-        emit_push(self, R11); // Padding for 16 byte alignment of RSP
+        emit_push(self, ARGUMENT_REGISTERS[3]);
 
         // Initialize other registers
         for reg in REGISTER_MAP.iter() {
@@ -1127,16 +1140,29 @@ impl<'a> JitCompiler<'a> {
                     // updated later, but not created after compiling (we need the address of the
                     // syscall function in the JIT-compiled program).
                     if let Some(syscall) = syscalls.get(&(insn.imm as u32)) {
+                        if self.enable_instruction_meter {
+                            emit_validate_and_profile_instruction_count(self, Some(0));
+                            emit_load(self, OperandSize::S64, RBP, R11, -8 * (CALLEE_SAVED_REGISTERS.len() + 2) as i32);
+                            emit_alu(self, OperationWidth::Bit64, 0x29, ARGUMENT_REGISTERS[0], R11, 0, None);
+                            emit_mov(self, R11, ARGUMENT_REGISTERS[0]);
+                            emit_load(self, OperandSize::S64, RBP, R11, -8 * (CALLEE_SAVED_REGISTERS.len() + 3) as i32);
+                            emit_rust_call(self, I::consume as *const u8, &[
+                                Argument { index: 1, value: Value::Register(ARGUMENT_REGISTERS[0]) },
+                                Argument { index: 0, value: Value::Register(R11) },
+                            ], None);
+                        }
+
                         match syscall {
                             Syscall::Function(func) => {
                                 emit_rust_call(self, *func as *const u8, &[
+                                    Argument { index: 0, value: Value::Stack(1) }, // Pointer to optional typed return value
                                     Argument { index: 1, value: Value::Register(ARGUMENT_REGISTERS[1]) },
                                     Argument { index: 2, value: Value::Register(ARGUMENT_REGISTERS[2]) },
                                     Argument { index: 3, value: Value::Register(ARGUMENT_REGISTERS[3]) },
                                     Argument { index: 4, value: Value::Register(ARGUMENT_REGISTERS[4]) },
                                     Argument { index: 5, value: Value::Register(ARGUMENT_REGISTERS[5]) },
                                     Argument { index: 6, value: Value::Register(R10) }, // JitProgramArgument::memory_mapping
-                                ]);
+                                ], None);
                             },
                             Syscall::Object(boxed) => {
                                 let fat_ptr_ptr = unsafe { std::mem::transmute::<_, *const *const SyscallTraitObject>(&boxed) };
@@ -1146,6 +1172,7 @@ impl<'a> JitCompiler<'a> {
                                 // Therefore, we Specify register arguments in reverse order, so that the move instructions do not overwrite each other.
                                 // This only affects the order of the move instructions, not the arguments.
                                 emit_rust_call(self, vtable.call, &[
+                                    Argument { index: 0, value: Value::Stack(1) }, // Pointer to optional typed return value
                                     Argument { index: 5, value: Value::Register(ARGUMENT_REGISTERS[4]) },
                                     Argument { index: 4, value: Value::Register(ARGUMENT_REGISTERS[3]) },
                                     Argument { index: 3, value: Value::Register(ARGUMENT_REGISTERS[2]) },
@@ -1153,7 +1180,7 @@ impl<'a> JitCompiler<'a> {
                                     Argument { index: 1, value: Value::Constant(unsafe { (*fat_ptr).data } as i64) }, // "&mut self" in the "call" method of the SyscallObject
                                     Argument { index: 6, value: Value::Register(ARGUMENT_REGISTERS[5]) },
                                     Argument { index: 7, value: Value::Register(R10) }, // JitProgramArgument::memory_mapping
-                                ]);
+                                ], None);
                             },
                         }
 
@@ -1164,6 +1191,15 @@ impl<'a> JitCompiler<'a> {
                         // Store Ok value in result register
                         emit_load(self, OperandSize::S64, RBP, R11, -8 * (CALLEE_SAVED_REGISTERS.len() + 1) as i32);
                         emit_load(self, OperandSize::S64, R11, REGISTER_MAP[0], 8);
+
+                        if self.enable_instruction_meter {
+                            emit_load(self, OperandSize::S64, RBP, R11, -8 * (CALLEE_SAVED_REGISTERS.len() + 3) as i32);
+                            emit_rust_call(self, I::get_remaining as *const u8, &[
+                                Argument { index: 0, value: Value::Register(R11) },
+                            ], Some(ARGUMENT_REGISTERS[0]));
+                            emit_store(self, OperandSize::S64, ARGUMENT_REGISTERS[0], RBP, -8 * (CALLEE_SAVED_REGISTERS.len() + 2) as i32);
+                            emit_undo_profile_instruction_count(self, 0);
+                        }
                     } else {
                         match executable.lookup_bpf_call(insn.imm as u32) {
                             Some(target_pc) => {
@@ -1204,29 +1240,23 @@ impl<'a> JitCompiler<'a> {
         // Handler for EbpfError::ExceededMaxInstructions
         set_anchor(self, TARGET_PC_CALL_EXCEEDED_MAX_INSTRUCTIONS);
         emit_mov(self, ARGUMENT_REGISTERS[0], R11);
-        emit_load(self, OperandSize::S64, RBP, REGISTER_MAP[0], -8 * (CALLEE_SAVED_REGISTERS.len() + 2) as i32);
-        emit_load(self, OperandSize::S64, RBP, R10, -8 * (CALLEE_SAVED_REGISTERS.len() + 1) as i32);
-        emit_store(self, OperandSize::S64, REGISTER_MAP[0], R10, 24); // total_insn_count = initial_instruction_meter;
         set_exception_kind::<E>(self, EbpfError::ExceededMaxInstructions(0, 0));
         emit_jmp(self, TARGET_PC_EXCEPTION_AT);
 
         // Handler for EbpfError::CallDepthExceeded
         set_anchor(self, TARGET_PC_CALL_DEPTH_EXCEEDED);
-        emit_load(self, OperandSize::S64, RBP, R10, -8 * (CALLEE_SAVED_REGISTERS.len() + 1) as i32);
-        emit_store_imm32(self, OperandSize::S64, R10, 24, MAX_CALL_DEPTH as i32); // depth = MAX_CALL_DEPTH;
         set_exception_kind::<E>(self, EbpfError::CallDepthExceeded(0, 0));
+        emit_store_imm32(self, OperandSize::S64, R10, 24, MAX_CALL_DEPTH as i32); // depth = MAX_CALL_DEPTH;
         emit_jmp(self, TARGET_PC_EXCEPTION_AT);
 
         // Handler for EbpfError::CallOutsideTextSegment
         set_anchor(self, TARGET_PC_CALL_OUTSIDE_TEXT_SEGMENT);
-        emit_load(self, OperandSize::S64, RBP, R10, -8 * (CALLEE_SAVED_REGISTERS.len() + 1) as i32);
-        emit_store(self, OperandSize::S64, REGISTER_MAP[0], R10, 24); // target_address = RAX;
         set_exception_kind::<E>(self, EbpfError::CallOutsideTextSegment(0, 0));
+        emit_store(self, OperandSize::S64, REGISTER_MAP[0], R10, 24); // target_address = RAX;
         emit_jmp(self, TARGET_PC_EXCEPTION_AT);
 
         // Handler for EbpfError::DivideByZero
         set_anchor(self, TARGET_PC_DIV_BY_ZERO);
-        emit_load(self, OperandSize::S64, RBP, R10, -8 * (CALLEE_SAVED_REGISTERS.len() + 1) as i32);
         set_exception_kind::<E>(self, EbpfError::DivideByZero(0));
         // emit_jmp(self, TARGET_PC_EXCEPTION_AT); // Fall-through
 
@@ -1325,16 +1355,16 @@ impl<'a> std::fmt::Debug for JitCompiler<'a> {
 }
 
 // In the end, this is the only thing we export
-pub fn compile<'a, E: UserDefinedError>(prog: &'a [u8],
+pub fn compile<'a, E: UserDefinedError, I: InstructionMeter>(prog: &'a [u8],
     executable: &'a dyn Executable<E>,
     syscalls: &HashMap<u32, Syscall<'a, E>>,
     enable_instruction_meter: bool)
-    -> Result<JitProgram<E>, EbpfError<E>> {
+    -> Result<JitProgram<E, I>, EbpfError<E>> {
 
     // TODO: check how long the page must be to be sure to support an eBPF program of maximum
     // possible length
     let mut jit = JitCompiler::new(128, enable_instruction_meter);
-    jit.compile(prog, executable, syscalls)?;
+    jit.compile::<E, I>(prog, executable, syscalls)?;
     jit.resolve_jumps();
 
     Ok(JitProgram {
