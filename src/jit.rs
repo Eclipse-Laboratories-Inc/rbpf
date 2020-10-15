@@ -22,9 +22,8 @@ use std::fmt::Error as FormatterError;
 use std::ops::{Index, IndexMut};
 
 use crate::{
-    vm::{Executable, Syscall, ProgramResult, InstructionMeter},
-    call_frames::{CALL_FRAME_SIZE, MAX_CALL_DEPTH},
-    ebpf::{self, INSN_SIZE, FIRST_SCRATCH_REG, SCRATCH_REGS, STACK_REG, MM_STACK_START, MM_PROGRAM_START},
+    vm::{Config, Executable, Syscall, ProgramResult, InstructionMeter},
+    ebpf::{self, INSN_SIZE, FIRST_SCRATCH_REG, SCRATCH_REGS, STACK_REG, MM_STACK_START},
     error::{UserDefinedError, EbpfError},
     memory_region::{AccessType, MemoryMapping},
     user_error::UserError,
@@ -261,6 +260,7 @@ fn emit_pop(jit: &mut JitCompiler, r: u8) {
     emit1(jit, 0x58 | (r & 0b111));
 }
 
+#[derive(Copy, Clone)]
 enum OperationWidth {
     Bit32 = 0,
     Bit64 = 1,
@@ -565,17 +565,17 @@ fn emit_bpf_call(jit: &mut JitCompiler, dst: Value, number_of_instructions: usiz
             // Store PC in case the bounds check fails
             emit_load_imm(jit, R11, jit.pc as i64);
             // Upper bound check
-            // if(RAX >= MM_PROGRAM_START + number_of_instructions * INSN_SIZE) throw CALL_OUTSIDE_TEXT_SEGMENT;
-            emit_load_imm(jit, REGISTER_MAP[STACK_REG], MM_PROGRAM_START as i64 + (number_of_instructions * INSN_SIZE) as i64);
+            // if(RAX >= jit.program_vm_addr + number_of_instructions * INSN_SIZE) throw CALL_OUTSIDE_TEXT_SEGMENT;
+            emit_load_imm(jit, REGISTER_MAP[STACK_REG], jit.program_vm_addr as i64 + (number_of_instructions * INSN_SIZE) as i64);
             emit_cmp(jit, REGISTER_MAP[STACK_REG], REGISTER_MAP[0], None);
             emit_jcc(jit, 0x83, TARGET_PC_CALL_OUTSIDE_TEXT_SEGMENT);
             // Lower bound check
-            // if(RAX < MM_PROGRAM_START) throw CALL_OUTSIDE_TEXT_SEGMENT;
-            emit_load_imm(jit, REGISTER_MAP[STACK_REG], MM_PROGRAM_START as i64);
+            // if(RAX < jit.program_vm_addr) throw CALL_OUTSIDE_TEXT_SEGMENT;
+            emit_load_imm(jit, REGISTER_MAP[STACK_REG], jit.program_vm_addr as i64);
             emit_cmp(jit, REGISTER_MAP[STACK_REG], REGISTER_MAP[0], None);
             emit_jcc(jit, 0x82, TARGET_PC_CALL_OUTSIDE_TEXT_SEGMENT);
             // Calculate offset relative to instruction_addresses
-            emit_alu(jit, OperationWidth::Bit64, 0x29, REGISTER_MAP[STACK_REG], REGISTER_MAP[0], 0, None); // RAX -= MM_PROGRAM_START;
+            emit_alu(jit, OperationWidth::Bit64, 0x29, REGISTER_MAP[STACK_REG], REGISTER_MAP[0], 0, None); // RAX -= jit.program_vm_addr;
             if jit.enable_instruction_meter {
                 // Calculate the target_pc to update the instruction_meter
                 let shift_amount = INSN_SIZE.trailing_zeros();
@@ -596,12 +596,12 @@ fn emit_bpf_call(jit: &mut JitCompiler, dst: Value, number_of_instructions: usiz
     }
 
     emit_load(jit, OperandSize::S64, RBP, REGISTER_MAP[STACK_REG], -8 * CALLEE_SAVED_REGISTERS.len() as i32); // load stack_ptr
-    emit_alu(jit, OperationWidth::Bit64, 0x81, 4, REGISTER_MAP[STACK_REG], !(CALL_FRAME_SIZE as i32 * 2 - 1), None); // stack_ptr &= !(CALL_FRAME_SIZE * 2 - 1, None);
-    emit_alu(jit, OperationWidth::Bit64, 0x81, 0, REGISTER_MAP[STACK_REG], CALL_FRAME_SIZE as i32 * 3, None); // stack_ptr += CALL_FRAME_SIZE * 3;
+    emit_alu(jit, OperationWidth::Bit64, 0x81, 4, REGISTER_MAP[STACK_REG], !(jit.config.stack_frame_size as i32 * 2 - 1), None); // stack_ptr &= !(jit.config.stack_frame_size * 2 - 1, None);
+    emit_alu(jit, OperationWidth::Bit64, 0x81, 0, REGISTER_MAP[STACK_REG], jit.config.stack_frame_size as i32 * 3, None); // stack_ptr += jit.config.stack_frame_size * 3;
     emit_store(jit, OperandSize::S64, REGISTER_MAP[STACK_REG], RBP, -8 * CALLEE_SAVED_REGISTERS.len() as i32); // store stack_ptr
 
-    // if(stack_ptr >= MM_STACK_START + MAX_CALL_DEPTH * CALL_FRAME_SIZE * 2) throw EbpfError::CallDepthExeeded;
-    emit_load_imm(jit, R11, MM_STACK_START as i64 + (MAX_CALL_DEPTH * CALL_FRAME_SIZE * 2) as i64);
+    // if(stack_ptr >= MM_STACK_START + jit.config.max_call_depth * jit.config.stack_frame_size * 2) throw EbpfError::CallDepthExeeded;
+    emit_load_imm(jit, R11, MM_STACK_START as i64 + (jit.config.max_call_depth * jit.config.stack_frame_size * 2) as i64);
     emit_cmp(jit, R11, REGISTER_MAP[STACK_REG], None);
     // Store PC in case the bounds check fails
     emit_load_imm(jit, R11, jit.pc as i64);
@@ -732,18 +732,14 @@ fn muldivmod(jit: &mut JitCompiler, opc: u8, src: u8, dst: u8, imm: i32) {
     let mul = (opc & ebpf::BPF_ALU_OP_MASK) == (ebpf::MUL32_IMM & ebpf::BPF_ALU_OP_MASK);
     let div = (opc & ebpf::BPF_ALU_OP_MASK) == (ebpf::DIV32_IMM & ebpf::BPF_ALU_OP_MASK);
     let modrm = (opc & ebpf::BPF_ALU_OP_MASK) == (ebpf::MOD32_IMM & ebpf::BPF_ALU_OP_MASK);
-    let is64 = (opc & ebpf::BPF_CLS_MASK) == ebpf::BPF_ALU64;
+    let width = if (opc & ebpf::BPF_CLS_MASK) == ebpf::BPF_ALU64 { OperationWidth::Bit64 } else { OperationWidth::Bit32 };
 
     if div || modrm {
         // Save pc
         emit_load_imm(jit, R11, jit.pc as i64);
 
         // test src,src
-        if is64 {
-            emit_alu(jit, OperationWidth::Bit64, 0x85, src, src, 0, None);
-        } else {
-            emit_alu(jit, OperationWidth::Bit32, 0x85, src, src, 0, None);
-        }
+        emit_alu(jit, width, 0x85, src, src, 0, None);
 
         // Jump if src is zero
         emit_jcc(jit, 0x84, TARGET_PC_DIV_BY_ZERO);
@@ -755,12 +751,11 @@ fn muldivmod(jit: &mut JitCompiler, opc: u8, src: u8, dst: u8, imm: i32) {
     if dst != RDX {
         emit_push(jit, RDX);
     }
-    emit_mov(jit, RCX, R11);
 
     if imm != 0 {
-        emit_load_imm(jit, RCX, imm as i64);
+        emit_load_imm(jit, R11, imm as i64);
     } else {
-        emit_mov(jit, src, RCX);
+        emit_mov(jit, src, R11);
     }
 
     if dst != RAX {
@@ -769,17 +764,11 @@ fn muldivmod(jit: &mut JitCompiler, opc: u8, src: u8, dst: u8, imm: i32) {
 
     if div || modrm {
         // xor %edx,%edx
-        emit_alu(jit, OperationWidth::Bit32, 0x31, RDX, RDX, 0, None);
+        emit_alu(jit, width, 0x31, RDX, RDX, 0, None);
     }
 
-    if is64 {
-        emit_rex(jit, 1, 0, 0, 0);
-    }
+    emit_alu(jit, width, 0xf7, if mul { 4 } else { 6 }, R11, 0, None);
 
-    // mul %ecx or div %ecx
-    emit_alu(jit, OperationWidth::Bit32, 0xf7, if mul { 4 } else { 6 }, RCX, 0, None);
-
-    emit_mov(jit, R11, RCX);
     if dst != RDX {
         if modrm {
             emit_mov(jit, RDX, dst);
@@ -813,14 +802,16 @@ struct JitCompiler<'a> {
     offset: usize,
     pc: usize,
     pc_locs: Vec<usize>,
+    program_vm_addr: u64,
     special_targets: HashMap<usize, usize>,
     jumps: Vec<Jump>,
+    config: Config,
     enable_instruction_meter: bool,
 }
 
 impl<'a> JitCompiler<'a> {
     // num_pages is unused on windows
-    fn new(_num_pages: usize, _enable_instruction_meter: bool) -> JitCompiler<'a> {
+    fn new(_num_pages: usize, _config: Config, _enable_instruction_meter: bool) -> JitCompiler<'a> {
         #[cfg(windows)]
         {
             panic!("JIT not supported on windows");
@@ -842,15 +833,20 @@ impl<'a> JitCompiler<'a> {
             offset: 0,
             pc: 0,
             pc_locs: vec![],
-            jumps: vec![],
+            program_vm_addr: 0,
             special_targets: HashMap::new(),
+            jumps: vec![],
+            config: _config,
             enable_instruction_meter: _enable_instruction_meter,
         }
     }
 
-    fn compile<E: UserDefinedError, I: InstructionMeter>(&mut self, prog: &[u8],
+    fn compile<E: UserDefinedError, I: InstructionMeter>(&mut self,
                    executable: &'a dyn Executable<E>,
                    syscalls: &HashMap<u32,  Syscall<'a, E>>) -> Result<(), EbpfError<E>> {
+        let (program_vm_addr, program) = executable.get_text_bytes()?;
+        self.program_vm_addr = program_vm_addr;
+
         // Save registers
         for reg in CALLEE_SAVED_REGISTERS.iter() {
             emit_push(self, *reg);
@@ -863,7 +859,7 @@ impl<'a> JitCompiler<'a> {
         emit_mov(self, ARGUMENT_REGISTERS[2], R10);
 
         // Initialize and save BPF stack pointer
-        emit_load_imm(self, REGISTER_MAP[STACK_REG], MM_STACK_START as i64 + CALL_FRAME_SIZE as i64);
+        emit_load_imm(self, REGISTER_MAP[STACK_REG], MM_STACK_START as i64 + self.config.stack_frame_size as i64);
         emit_push(self, REGISTER_MAP[STACK_REG]);
 
         // Save pointer to optional typed return value
@@ -883,16 +879,26 @@ impl<'a> JitCompiler<'a> {
             }
         }
 
+        // Jump to custom entry point (if any)
         let entry = executable.get_entrypoint_instruction_offset().unwrap();
         if entry != 0 {
             emit_profile_instruction_count(self, Some(entry + 1));
             emit_jmp(self, entry);
         }
 
-        self.pc_locs = vec![0; prog.len() / ebpf::INSN_SIZE + 1];
+        // Scan through program to find actual number of instructions
+        while self.pc * ebpf::INSN_SIZE < program.len() {
+            let insn = ebpf::get_insn(program, self.pc);
+            self.pc += match insn.opc {
+                ebpf::LD_DW_IMM => 2,
+                _ => 1,
+            };
+        }
+        self.pc_locs = vec![0; self.pc];
+        self.pc = 0;
 
-        while self.pc * ebpf::INSN_SIZE < prog.len() {
-            let insn = ebpf::get_insn(prog, self.pc);
+        while self.pc * ebpf::INSN_SIZE < program.len() {
+            let insn = ebpf::get_insn(program, self.pc);
 
             self.pc_locs[self.pc] = self.offset;
 
@@ -939,7 +945,7 @@ impl<'a> JitCompiler<'a> {
                 ebpf::LD_DW_IMM  => {
                     emit_validate_and_profile_instruction_count(self, Some(self.pc + 2));
                     self.pc += 1;
-                    let second_part = ebpf::get_insn(prog, self.pc).imm as u64;
+                    let second_part = ebpf::get_insn(program, self.pc).imm as u64;
                     let imm = (insn.imm as u32) as u64 | second_part.wrapping_shl(32);
                     emit_load_imm(self, dst, imm as i64);
                 },
@@ -1203,21 +1209,21 @@ impl<'a> JitCompiler<'a> {
                     } else {
                         match executable.lookup_bpf_call(insn.imm as u32) {
                             Some(target_pc) => {
-                                emit_bpf_call(self, Value::Constant(*target_pc as i64), prog.len() / ebpf::INSN_SIZE);
+                                emit_bpf_call(self, Value::Constant(*target_pc as i64), self.pc_locs.len());
                             },
                             None => executable.report_unresolved_symbol(self.pc)?,
                         }
                     }
                 },
                 ebpf::CALL_REG  => {
-                    emit_bpf_call(self, Value::Register(REGISTER_MAP[insn.imm as usize]), prog.len() / ebpf::INSN_SIZE);
+                    emit_bpf_call(self, Value::Register(REGISTER_MAP[insn.imm as usize]), self.pc_locs.len());
                 },
                 ebpf::EXIT      => {
                     emit_validate_and_profile_instruction_count(self, Some(0));
 
                     emit_load(self, OperandSize::S64, RBP, REGISTER_MAP[STACK_REG], -8 * CALLEE_SAVED_REGISTERS.len() as i32); // load stack_ptr
-                    emit_alu(self, OperationWidth::Bit64, 0x81, 4, REGISTER_MAP[STACK_REG], !(CALL_FRAME_SIZE as i32 * 2 - 1), None); // stack_ptr &= !(CALL_FRAME_SIZE * 2 - 1, None);
-                    emit_alu(self, OperationWidth::Bit64, 0x81, 5, REGISTER_MAP[STACK_REG], CALL_FRAME_SIZE as i32 * 2, None); // stack_ptr -= CALL_FRAME_SIZE * 2;
+                    emit_alu(self, OperationWidth::Bit64, 0x81, 4, REGISTER_MAP[STACK_REG], !(self.config.stack_frame_size as i32 * 2 - 1), None); // stack_ptr &= !(jit.config.stack_frame_size * 2 - 1, None);
+                    emit_alu(self, OperationWidth::Bit64, 0x81, 5, REGISTER_MAP[STACK_REG], self.config.stack_frame_size as i32 * 2, None); // stack_ptr -= jit.config.stack_frame_size * 2;
                     emit_store(self, OperandSize::S64, REGISTER_MAP[STACK_REG], RBP, -8 * CALLEE_SAVED_REGISTERS.len() as i32); // store stack_ptr
 
                     // if(stack_ptr < MM_STACK_START) goto exit;
@@ -1246,7 +1252,7 @@ impl<'a> JitCompiler<'a> {
         // Handler for EbpfError::CallDepthExceeded
         set_anchor(self, TARGET_PC_CALL_DEPTH_EXCEEDED);
         set_exception_kind::<E>(self, EbpfError::CallDepthExceeded(0, 0));
-        emit_store_imm32(self, OperandSize::S64, R10, 24, MAX_CALL_DEPTH as i32); // depth = MAX_CALL_DEPTH;
+        emit_store_imm32(self, OperandSize::S64, R10, 24, self.config.max_call_depth as i32); // depth = jit.config.max_call_depth;
         emit_jmp(self, TARGET_PC_EXCEPTION_AT);
 
         // Handler for EbpfError::CallOutsideTextSegment
@@ -1355,16 +1361,17 @@ impl<'a> std::fmt::Debug for JitCompiler<'a> {
 }
 
 // In the end, this is the only thing we export
-pub fn compile<'a, E: UserDefinedError, I: InstructionMeter>(prog: &'a [u8],
+pub fn compile<'a, E: UserDefinedError, I: InstructionMeter>(
     executable: &'a dyn Executable<E>,
+    config: Config,
     syscalls: &HashMap<u32, Syscall<'a, E>>,
     enable_instruction_meter: bool)
     -> Result<JitProgram<E, I>, EbpfError<E>> {
 
     // TODO: check how long the page must be to be sure to support an eBPF program of maximum
     // possible length
-    let mut jit = JitCompiler::new(128, enable_instruction_meter);
-    jit.compile::<E, I>(prog, executable, syscalls)?;
+    let mut jit = JitCompiler::new(256, config, enable_instruction_meter);
+    jit.compile::<E, I>(executable, syscalls)?;
     jit.resolve_jumps();
 
     Ok(JitProgram {

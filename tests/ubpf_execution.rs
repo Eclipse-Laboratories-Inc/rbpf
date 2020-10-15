@@ -17,7 +17,6 @@ use common::{
 };
 use solana_rbpf::{
     assembler::assemble,
-    call_frames::MAX_CALL_DEPTH,
     ebpf::{self, hash_symbol_name},
     elf::ELFError,
     error::EbpfError,
@@ -25,7 +24,7 @@ use solana_rbpf::{
     syscalls,
     user_error::UserError,
     verifier::check,
-    vm::{DefaultInstructionMeter, EbpfVm, Executable, Syscall},
+    vm::{Config, DefaultInstructionMeter, EbpfVm, Executable, Syscall},
 };
 use std::{fs::File, io::Read};
 
@@ -37,7 +36,7 @@ macro_rules! test_interpreter_and_jit {
         let check_closure = $check;
         let instruction_count_interpreter = {
             let mem = $mem;
-            let mut vm = EbpfVm::<UserError, TestInstructionMeter>::new($executable.as_ref(), &mem, &[]).unwrap();
+            let mut vm = EbpfVm::<UserError, TestInstructionMeter>::new($executable.as_ref(), Config::default(), &mem, &[]).unwrap();
             test_interpreter_and_jit!(vm, $($location => $syscall),*);
             assert!(check_closure(vm.execute_program_interpreted(&mut TestInstructionMeter { remaining: $expected_instruction_count })));
             vm.get_total_instruction_count()
@@ -45,14 +44,12 @@ macro_rules! test_interpreter_and_jit {
         #[cfg(not(windows))]
         {
             let mem = $mem;
-            let mut vm = EbpfVm::<UserError, TestInstructionMeter>::new($executable.as_ref(), &mem, &[]).unwrap();
+            let mut vm = EbpfVm::<UserError, TestInstructionMeter>::new($executable.as_ref(), Config::default(), &mem, &[]).unwrap();
             test_interpreter_and_jit!(vm, $($location => $syscall),*);
             match vm.jit_compile() {
                 Err(err) => assert!(check_closure(Err(err))),
                 Ok(()) => {
-                    let res = unsafe { vm.execute_program_jit(&mut TestInstructionMeter { remaining: $expected_instruction_count }) };
-                    println!("res={:?}", res);
-                    assert!(check_closure(res));
+                    assert!(check_closure(unsafe { vm.execute_program_jit(&mut TestInstructionMeter { remaining: $expected_instruction_count }) }));
                     let instruction_count_jit = vm.get_total_instruction_count();
                     assert_eq!(instruction_count_interpreter, instruction_count_jit);
                 },
@@ -242,6 +239,59 @@ fn test_alu64_arithmetic() {
         (),
         { |res: ExecResult| { res.unwrap() == 0x2a } },
         19
+    );
+}
+
+#[test]
+fn test_mul128() {
+    test_interpreter_and_jit_asm!(
+        "
+        mov r0, r1
+        mov r2, 30
+        mov r3, 0
+        mov r4, 20
+        mov r5, 0
+        mul64 r3, r4
+        mul64 r5, r2
+        add64 r5, r3
+        mov64 r0, r2
+        rsh64 r0, 0x20
+        mov64 r3, r4
+        rsh64 r3, 0x20
+        mov64 r6, r3
+        mul64 r6, r0
+        add64 r5, r6
+        lsh64 r4, 0x20
+        rsh64 r4, 0x20
+        mov64 r6, r4
+        mul64 r6, r0
+        lsh64 r2, 0x20
+        rsh64 r2, 0x20
+        mul64 r4, r2
+        mov64 r0, r4
+        rsh64 r0, 0x20
+        add64 r0, r6
+        mov64 r6, r0
+        rsh64 r6, 0x20
+        add64 r5, r6
+        mul64 r3, r2
+        lsh64 r0, 0x20
+        rsh64 r0, 0x20
+        add64 r0, r3
+        mov64 r2, r0
+        rsh64 r2, 0x20
+        add64 r5, r2
+        stxdw [r1+0x8], r5
+        lsh64 r0, 0x20
+        lsh64 r4, 0x20
+        rsh64 r4, 0x20
+        or64 r0, r4
+        stxdw [r1+0x0], r0
+        exit",
+        [0; 16],
+        (),
+        { |res: ExecResult| { res.unwrap() == 600 } },
+        42
     );
 }
 
@@ -2281,7 +2331,8 @@ fn test_err_oob_callx_high() {
 
 #[test]
 fn test_bpf_to_bpf_depth() {
-    for i in 0..MAX_CALL_DEPTH {
+    let config = Config::default();
+    for i in 0..config.max_call_depth {
         test_interpreter_and_jit_elf!(
             "tests/elfs/multiple_file.so",
             [i as u8],
@@ -2296,9 +2347,10 @@ fn test_bpf_to_bpf_depth() {
 
 #[test]
 fn test_err_bpf_to_bpf_too_deep() {
+    let config = Config::default();
     test_interpreter_and_jit_elf!(
         "tests/elfs/multiple_file.so",
-        [MAX_CALL_DEPTH as u8],
+        [config.max_call_depth as u8],
         (
             hash_symbol_name(b"log") => Syscall::Function(bpf_syscall_string),
         ),
@@ -2306,7 +2358,7 @@ fn test_err_bpf_to_bpf_too_deep() {
             |res: ExecResult| {
                 matches!(res.unwrap_err(),
                     EbpfError::CallDepthExceeded(pc, depth)
-                    if pc == 55 && depth == MAX_CALL_DEPTH
+                    if pc == 55 && depth == config.max_call_depth
                 )
             }
         },
@@ -2316,6 +2368,7 @@ fn test_err_bpf_to_bpf_too_deep() {
 
 #[test]
 fn test_err_reg_stack_depth() {
+    let config = Config::default();
     test_interpreter_and_jit_asm!(
         "
         mov64 r0, 0x1
@@ -2330,7 +2383,7 @@ fn test_err_reg_stack_depth() {
             |res: ExecResult| {
                 matches!(res.unwrap_err(),
                     EbpfError::CallDepthExceeded(pc, depth)
-                    if pc == 31 && depth == MAX_CALL_DEPTH
+                    if pc == 31 && depth == config.max_call_depth
                 )
             }
         },
@@ -2992,9 +3045,13 @@ fn test_large_program() {
         write_insn(&mut prog, ebpf::PROG_MAX_INSNS - 2, "ja 0x0");
 
         let executable = Executable::<UserError>::from_text_bytes(&prog, None).unwrap();
-        let mut vm =
-            EbpfVm::<UserError, DefaultInstructionMeter>::new(executable.as_ref(), &[], &[])
-                .unwrap();
+        let mut vm = EbpfVm::<UserError, DefaultInstructionMeter>::new(
+            executable.as_ref(),
+            Config::default(),
+            &[],
+            &[],
+        )
+        .unwrap();
         assert_eq!(
             0,
             vm.execute_program_interpreted(&mut DefaultInstructionMeter {})
