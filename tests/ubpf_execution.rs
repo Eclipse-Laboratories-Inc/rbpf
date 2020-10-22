@@ -1,4 +1,4 @@
-// Copyright 2020 Solana <alexander@solana.com>
+// Copyright 2020 Solana Maintainers <maintainers@solana.com>
 //
 // Licensed under the Apache License, Version 2.0 <http://www.apache.org/licenses/LICENSE-2.0> or
 // the MIT license <http://opensource.org/licenses/MIT>, at your option. This file may not be
@@ -7,14 +7,9 @@
 extern crate byteorder;
 extern crate libc;
 extern crate solana_rbpf;
+extern crate test_utils;
 extern crate thiserror;
 
-mod common;
-
-use common::{
-    bpf_syscall_string, bpf_syscall_u64, bpf_trace_printf, ExecResult, SyscallWithContext,
-    TestInstructionMeter, PROG_TCP_PORT_80, TCP_SACK_ASM, TCP_SACK_MATCH, TCP_SACK_NOMATCH,
-};
 use solana_rbpf::{
     assembler::assemble,
     ebpf::{self, hash_symbol_name},
@@ -27,6 +22,10 @@ use solana_rbpf::{
     vm::{Config, DefaultInstructionMeter, EbpfVm, Executable, Syscall},
 };
 use std::{fs::File, io::Read};
+use test_utils::{
+    bpf_syscall_string, bpf_syscall_u64, bpf_trace_printf, ExecResult, SyscallWithContext,
+    TestInstructionMeter, PROG_TCP_PORT_80, TCP_SACK_ASM, TCP_SACK_MATCH, TCP_SACK_NOMATCH,
+};
 
 macro_rules! test_interpreter_and_jit {
     ($vm:expr, $($location:expr => $syscall:expr),*) => {
