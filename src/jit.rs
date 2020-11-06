@@ -14,7 +14,7 @@
 
 extern crate libc;
 
-use std;
+use std::fmt::Debug;
 use std::mem;
 use std::collections::HashMap;
 use std::fmt::Formatter;
@@ -22,7 +22,7 @@ use std::fmt::Error as FormatterError;
 use std::ops::{Index, IndexMut};
 
 use crate::{
-    vm::{Config, Executable, Syscall, ProgramResult, InstructionMeter},
+    vm::{Config, Executable, ProgramResult, InstructionMeter},
     ebpf::{self, INSN_SIZE, FIRST_SCRATCH_REG, SCRATCH_REGS, STACK_REG, MM_STACK_START},
     error::{UserDefinedError, EbpfError},
     memory_region::{AccessType, MemoryMapping},
@@ -33,45 +33,26 @@ use crate::{
 pub struct JitProgramArgument {
     /// The MemoryMapping to be used to run the compiled code
     pub memory_mapping: MemoryMapping,
-    /// Pointers to the instructions of the compiled code
-    pub instruction_addresses: [*const u8; 0],
+    /// Pointers to the context objects of syscalls
+    pub syscall_context_objects: [*const u8; 0],
 }
 
 /// eBPF JIT-compiled program
 pub struct JitProgram<E: UserDefinedError, I: InstructionMeter> {
     /// Call this with JitProgramArgument to execute the compiled code
     pub main: unsafe fn(&ProgramResult<E>, u64, &JitProgramArgument, &mut I) -> i64,
-    /// Pointers to the instructions of the compiled code
-    pub instruction_addresses: Vec<*const u8>,
 }
 
-/// Combines program and argument for a VM instance
-pub struct JitProgramAndArgument<E: UserDefinedError, I: InstructionMeter> {
-    /// JIT-compiled program
-    pub program: JitProgram<E, I>,
-    /// The argument is actually a JitProgramArgument
-    pub argument: Vec<*const u8>,
+impl<E: UserDefinedError, I: InstructionMeter> Debug for JitProgram<E, I> {
+    fn fmt(&self, fmt: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        fmt.write_fmt(format_args!("JitProgram {:?}", &self.main as *const _))
+    }
 }
 
-/// A virtual method table for SyscallObject
-struct SyscallObjectVtable {
-    /// Drops the dyn trait object
-    pub drop: fn(*const u8),
-    /// Size of the dyn trait object in bytes
-    pub size: usize,
-    /// Alignment of the dyn trait object in bytes
-    pub align: usize,
-    /// The call method of the SyscallObject
-    pub call: *const u8,
-}
-
-// Could be replaced by https://doc.rust-lang.org/std/raw/struct.TraitObject.html
-/// A dyn trait fat pointer for SyscallObject
-struct SyscallTraitObject {
-    /// Pointer to the actual object
-    pub data: *const u8,
-    /// Pointer to the virtual method table
-    pub vtable: *const SyscallObjectVtable,
+impl<E: UserDefinedError, I: InstructionMeter>  PartialEq for JitProgram<E, I> {
+    fn eq(&self, other: &JitProgram<E, I>) -> bool {
+        self.main as *const u8 == other.main as *const u8
+    }
 }
 
 // Special values for target_pc in struct Jump
@@ -587,9 +568,9 @@ fn emit_bpf_call(jit: &mut JitCompiler, dst: Value, number_of_instructions: usiz
             // Load host target_address from JitProgramArgument.instruction_addresses
             assert_eq!(INSN_SIZE, 8); // Because the instruction size is also the slot size we do not need to shift the offset
             emit_mov(jit, REGISTER_MAP[0], REGISTER_MAP[STACK_REG]);
-            emit_mov(jit, R10, REGISTER_MAP[STACK_REG]);
-            emit_alu(jit, OperationWidth::Bit64, 0x01, REGISTER_MAP[STACK_REG], REGISTER_MAP[0], 0, None); // RAX += &JitProgramArgument as *const _;
-            emit_load(jit, OperandSize::S64, REGISTER_MAP[0], REGISTER_MAP[0], std::mem::size_of::<JitProgramArgument>() as i32); // RAX = JitProgramArgument.instruction_addresses[RAX / 8];
+            emit_load_imm(jit, REGISTER_MAP[STACK_REG], jit.pc_locs.as_ptr() as i64);
+            emit_alu(jit, OperationWidth::Bit64, 0x01, REGISTER_MAP[STACK_REG], REGISTER_MAP[0], 0, None); // RAX += jit.pc_locs;
+            emit_load(jit, OperandSize::S64, REGISTER_MAP[0], REGISTER_MAP[0], 0); // RAX = jit.pc_locs[RAX / 8];
         },
         Value::Constant(_target_pc) => {},
         _ => panic!()
@@ -651,8 +632,11 @@ fn emit_rust_call(jit: &mut JitCompiler, function: *const u8, arguments: &[Argum
             Value::Register(reg) => {
                 let src = saved_registers.iter().position(|x| *x == reg).unwrap();
                 saved_registers.remove(src);
-                let dst = saved_registers.len()-(argument.index-ARGUMENT_REGISTERS.len());
+                let dst = saved_registers.len() - (argument.index - ARGUMENT_REGISTERS.len());
                 saved_registers.insert(dst, reg);
+            },
+            Value::Stack(slot) => {
+                emit_load(jit, OperandSize::S64, RBP, R11, -8 * (CALLEE_SAVED_REGISTERS.len() as i32 + slot));
             },
             _ => panic!()
         }
@@ -798,10 +782,10 @@ struct Jump {
 }
 
 struct JitCompiler<'a> {
+    pc_locs: &'a mut [u64],
     contents: &'a mut [u8],
     offset: usize,
     pc: usize,
-    pc_locs: Vec<usize>,
     program_vm_addr: u64,
     special_targets: HashMap<usize, usize>,
     jumps: Vec<Jump>,
@@ -811,39 +795,64 @@ struct JitCompiler<'a> {
 
 impl<'a> JitCompiler<'a> {
     // num_pages is unused on windows
-    fn new(_num_pages: usize, _config: Config, _enable_instruction_meter: bool) -> JitCompiler<'a> {
+    fn new(_program: &[u8], _config: &Config, _enable_instruction_meter: bool) -> JitCompiler<'a> {
         #[cfg(windows)]
         {
             panic!("JIT not supported on windows");
         }
+        let pc_locs: &mut[u64];
         let contents: &mut[u8];
+
         #[cfg(not(windows))] // Without this block windows will fail ungracefully, hence the panic above
         unsafe {
+            // Scan through program to find actual number of instructions
+            let mut pc = 0;
+            while pc * ebpf::INSN_SIZE < _program.len() {
+                let insn = ebpf::get_insn(_program, pc);
+                pc += match insn.opc {
+                    ebpf::LD_DW_IMM => 2,
+                    _ => 1,
+                };
+            }
+
+            // TODO: Ensure that an eBPF program of maximum possible length fits
+            const CONTENT_PAGES: usize = 256;
             const PAGE_SIZE: usize = 4096;
-            let size = _num_pages * PAGE_SIZE;
+            let pc_loc_table_size = (pc * 8 + PAGE_SIZE - 1) / PAGE_SIZE * PAGE_SIZE;
+            let code_size = CONTENT_PAGES * PAGE_SIZE;
+
             let mut raw: *mut libc::c_void = std::mem::MaybeUninit::uninit().assume_init();
-            libc::posix_memalign(&mut raw, PAGE_SIZE, size);
-            libc::mprotect(raw, size, libc::PROT_EXEC | libc::PROT_READ | libc::PROT_WRITE);
-            std::ptr::write_bytes(raw, 0xcc, size); // Populate with debugger traps
-            contents = std::slice::from_raw_parts_mut(raw as *mut u8, _num_pages * PAGE_SIZE);
+            libc::posix_memalign(&mut raw, PAGE_SIZE, pc_loc_table_size + code_size);
+
+            std::ptr::write_bytes(raw, 0x00, pc_loc_table_size);
+            pc_locs = std::slice::from_raw_parts_mut(raw as *mut u64, pc);
+
+            std::ptr::write_bytes(raw.add(pc_loc_table_size), 0xcc, code_size); // Populate with debugger traps
+            contents = std::slice::from_raw_parts_mut(raw.add(pc_loc_table_size) as *mut u8, code_size);
         }
 
         JitCompiler {
+            pc_locs,
             contents,
             offset: 0,
             pc: 0,
-            pc_locs: vec![],
             program_vm_addr: 0,
             special_targets: HashMap::new(),
             jumps: vec![],
-            config: _config,
+            config: *_config,
             enable_instruction_meter: _enable_instruction_meter,
         }
     }
 
+    fn set_permissions(&mut self) {
+        #[cfg(not(windows))]
+        unsafe {
+            libc::mprotect(self.contents.as_mut_ptr() as *mut _, self.contents.len(), libc::PROT_EXEC | libc::PROT_READ);
+        }
+    }
+
     fn compile<E: UserDefinedError, I: InstructionMeter>(&mut self,
-                   executable: &'a dyn Executable<E>,
-                   syscalls: &HashMap<u32,  Syscall<'a, E>>) -> Result<(), EbpfError<E>> {
+                   executable: &'a dyn Executable<E, I>) -> Result<(), EbpfError<E>> {
         let (program_vm_addr, program) = executable.get_text_bytes()?;
         self.program_vm_addr = program_vm_addr;
 
@@ -886,21 +895,10 @@ impl<'a> JitCompiler<'a> {
             emit_jmp(self, entry);
         }
 
-        // Scan through program to find actual number of instructions
-        while self.pc * ebpf::INSN_SIZE < program.len() {
-            let insn = ebpf::get_insn(program, self.pc);
-            self.pc += match insn.opc {
-                ebpf::LD_DW_IMM => 2,
-                _ => 1,
-            };
-        }
-        self.pc_locs = vec![0; self.pc];
-        self.pc = 0;
-
         while self.pc * ebpf::INSN_SIZE < program.len() {
             let insn = ebpf::get_insn(program, self.pc);
 
-            self.pc_locs[self.pc] = self.offset;
+            self.pc_locs[self.pc] = self.offset as u64;
 
             let dst = map_register(insn.dst);
             let src = map_register(insn.src);
@@ -1145,7 +1143,7 @@ impl<'a> JitCompiler<'a> {
                     // For JIT, syscalls MUST be registered at compile time. They can be
                     // updated later, but not created after compiling (we need the address of the
                     // syscall function in the JIT-compiled program).
-                    if let Some(syscall) = syscalls.get(&(insn.imm as u32)) {
+                    if let Some(syscall) = executable.get_syscall_registry().lookup_syscall(insn.imm as u32) {
                         if self.enable_instruction_meter {
                             emit_validate_and_profile_instruction_count(self, Some(0));
                             emit_load(self, OperandSize::S64, RBP, R11, -8 * (CALLEE_SAVED_REGISTERS.len() + 2) as i32);
@@ -1158,37 +1156,17 @@ impl<'a> JitCompiler<'a> {
                             ], None);
                         }
 
-                        match syscall {
-                            Syscall::Function(func) => {
-                                emit_rust_call(self, *func as *const u8, &[
-                                    Argument { index: 0, value: Value::Stack(1) }, // Pointer to optional typed return value
-                                    Argument { index: 1, value: Value::Register(ARGUMENT_REGISTERS[1]) },
-                                    Argument { index: 2, value: Value::Register(ARGUMENT_REGISTERS[2]) },
-                                    Argument { index: 3, value: Value::Register(ARGUMENT_REGISTERS[3]) },
-                                    Argument { index: 4, value: Value::Register(ARGUMENT_REGISTERS[4]) },
-                                    Argument { index: 5, value: Value::Register(ARGUMENT_REGISTERS[5]) },
-                                    Argument { index: 6, value: Value::Register(R10) }, // JitProgramArgument::memory_mapping
-                                ], None);
-                            },
-                            Syscall::Object(boxed) => {
-                                let fat_ptr_ptr = unsafe { std::mem::transmute::<_, *const *const SyscallTraitObject>(&boxed) };
-                                let fat_ptr = unsafe { std::mem::transmute::<_, *const SyscallTraitObject>(*fat_ptr_ptr) };
-                                let vtable = unsafe { std::mem::transmute::<_, &SyscallObjectVtable>(&*(*fat_ptr).vtable) };
-                                // We need to displace the arguments by one in upward direction to make room for "&mut self".
-                                // Therefore, we Specify register arguments in reverse order, so that the move instructions do not overwrite each other.
-                                // This only affects the order of the move instructions, not the arguments.
-                                emit_rust_call(self, vtable.call, &[
-                                    Argument { index: 0, value: Value::Stack(1) }, // Pointer to optional typed return value
-                                    Argument { index: 5, value: Value::Register(ARGUMENT_REGISTERS[4]) },
-                                    Argument { index: 4, value: Value::Register(ARGUMENT_REGISTERS[3]) },
-                                    Argument { index: 3, value: Value::Register(ARGUMENT_REGISTERS[2]) },
-                                    Argument { index: 2, value: Value::Register(ARGUMENT_REGISTERS[1]) },
-                                    Argument { index: 1, value: Value::Constant(unsafe { (*fat_ptr).data } as i64) }, // "&mut self" in the "call" method of the SyscallObject
-                                    Argument { index: 6, value: Value::Register(ARGUMENT_REGISTERS[5]) },
-                                    Argument { index: 7, value: Value::Register(R10) }, // JitProgramArgument::memory_mapping
-                                ], None);
-                            },
-                        }
+                        emit_load(self, OperandSize::S64, R10, RAX, (2 + syscall.context_object_slot as i32) * 8);
+                        emit_rust_call(self, syscall.function as *const u8, &[
+                            Argument { index: 0, value: Value::Register(RAX) }, // "&mut self" in the "call" method of the SyscallObject
+                            Argument { index: 1, value: Value::Register(ARGUMENT_REGISTERS[1]) },
+                            Argument { index: 2, value: Value::Register(ARGUMENT_REGISTERS[2]) },
+                            Argument { index: 3, value: Value::Register(ARGUMENT_REGISTERS[3]) },
+                            Argument { index: 4, value: Value::Register(ARGUMENT_REGISTERS[4]) },
+                            Argument { index: 5, value: Value::Register(ARGUMENT_REGISTERS[5]) },
+                            Argument { index: 6, value: Value::Register(R10) }, // JitProgramArgument::memory_mapping
+                            Argument { index: 7, value: Value::Stack(1) }, // Pointer to optional typed return value
+                        ], None);
 
                         // Throw error if the result indicates one
                         emit_load_imm(self, R11, self.pc as i64);
@@ -1312,7 +1290,7 @@ impl<'a> JitCompiler<'a> {
         for jump in &self.jumps {
             let target_loc = match self.special_targets.get(&jump.target_pc) {
                 Some(target) => *target,
-                None         => self.pc_locs[jump.target_pc as usize]
+                None         => self.pc_locs[jump.target_pc as usize] as usize
             };
 
             // Assumes jump offset is at end of instruction
@@ -1325,6 +1303,10 @@ impl<'a> JitCompiler<'a> {
                 libc::memcpy(offset_ptr as *mut libc::c_void, rel as *const libc::c_void,
                              std::mem::size_of::<i32>());
             }
+        }
+
+        for offset in self.pc_locs.iter_mut() {
+            *offset = unsafe { (self.contents.as_ptr() as *const u8).add(*offset as usize) } as u64;
         }
     }
 } // struct JitCompiler
@@ -1360,22 +1342,18 @@ impl<'a> std::fmt::Debug for JitCompiler<'a> {
     }
 }
 
-// In the end, this is the only thing we export
-pub fn compile<'a, E: UserDefinedError, I: InstructionMeter>(
-    executable: &'a dyn Executable<E>,
-    config: Config,
-    syscalls: &HashMap<u32, Syscall<'a, E>>,
+pub fn compile<E: UserDefinedError, I: InstructionMeter>(
+    executable: &dyn Executable<E, I>,
     enable_instruction_meter: bool)
     -> Result<JitProgram<E, I>, EbpfError<E>> {
 
-    // TODO: check how long the page must be to be sure to support an eBPF program of maximum
-    // possible length
-    let mut jit = JitCompiler::new(256, config, enable_instruction_meter);
-    jit.compile::<E, I>(executable, syscalls)?;
+    let program = executable.get_text_bytes()?.1;
+    let mut jit = JitCompiler::new(program, executable.get_config(), enable_instruction_meter);
+    jit.compile::<E, I>(executable)?;
     jit.resolve_jumps();
+    jit.set_permissions();
 
     Ok(JitProgram {
         main: unsafe { mem::transmute(jit.contents.as_ptr()) },
-        instruction_addresses: jit.pc_locs.iter().map(|offset| unsafe { jit.contents.as_ptr().add(*offset) }).collect(),
     })
 }

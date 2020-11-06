@@ -11,7 +11,8 @@ extern crate scroll;
 
 use crate::{
     error::{EbpfError, UserDefinedError},
-    vm::Executable,
+    jit::{compile, JitProgram},
+    vm::{Config, Executable, InstructionMeter, SyscallRegistry},
 };
 use byteorder::{ByteOrder, LittleEndian};
 use ebpf;
@@ -19,7 +20,7 @@ use elf::goblin::{
     elf::{header::*, reloc::*, section_header::*, Elf},
     error::Error as GoblinError,
 };
-use std::{collections::HashMap, mem, ops::Range, str};
+use std::{collections::HashMap, fmt::Debug, mem, ops::Range, str};
 
 /// Error definitions
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
@@ -169,7 +170,9 @@ struct SectionInfo {
 
 /// Elf loader/relocator
 #[derive(Debug, PartialEq)]
-pub struct EBpfElf {
+pub struct EBpfElf<E: UserDefinedError, I: InstructionMeter> {
+    /// Configuration settings
+    config: Config,
     /// Loaded and executable elf
     elf_bytes: Vec<u8>,
     /// Entrypoint instruction offset
@@ -180,8 +183,18 @@ pub struct EBpfElf {
     ro_section_infos: Vec<SectionInfo>,
     /// Call resolution map
     calls: HashMap<u32, usize>,
+    /// Syscall resolution map
+    syscall_registry: SyscallRegistry,
+    /// Compiled program and argument
+    compiled_program: Option<JitProgram<E, I>>,
 }
-impl<E: UserDefinedError> Executable<E> for EBpfElf {
+
+impl<E: UserDefinedError, I: InstructionMeter> Executable<E, I> for EBpfElf<E, I> {
+    /// Get the configuration settings
+    fn get_config(&self) -> &Config {
+        &self.config
+    }
+
     /// Get the .text section virtual address and bytes
     fn get_text_bytes(&self) -> Result<(u64, &[u8]), EbpfError<E>> {
         Ok((
@@ -218,6 +231,27 @@ impl<E: UserDefinedError> Executable<E> for EBpfElf {
         self.calls.get(&hash)
     }
 
+    /// Get the syscall registry
+    fn get_syscall_registry(&self) -> &SyscallRegistry {
+        &self.syscall_registry
+    }
+
+    /// Set (overwrite) the syscall registry
+    fn set_syscall_registry(&mut self, syscall_registry: SyscallRegistry) {
+        self.syscall_registry = syscall_registry;
+    }
+
+    /// Get the JIT compiled program
+    fn get_compiled_program(&self) -> Option<&JitProgram<E, I>> {
+        self.compiled_program.as_ref()
+    }
+
+    /// JIT compile the executable
+    fn jit_compile(&mut self) -> Result<(), EbpfError<E>> {
+        self.compiled_program = Some(compile::<E, I>(self, true)?);
+        Ok(())
+    }
+
     /// Report information on a symbol that failed to be resolved
     fn report_unresolved_symbol(&self, insn_offset: usize) -> Result<(), EbpfError<E>> {
         let file_offset =
@@ -251,10 +285,12 @@ impl<E: UserDefinedError> Executable<E> for EBpfElf {
         .into())
     }
 }
-impl EBpfElf {
+
+impl<'a, E: UserDefinedError, I: InstructionMeter> EBpfElf<E, I> {
     /// Create from raw text section bytes (list of instructions)
-    pub fn new_from_text_bytes(text_bytes: &[u8]) -> Self {
+    pub fn new_from_text_bytes(config: Config, text_bytes: &[u8]) -> Self {
         Self {
+            config,
             elf_bytes: text_bytes.to_vec(),
             entrypoint: 0,
             text_section_info: SectionInfo {
@@ -266,10 +302,13 @@ impl EBpfElf {
             },
             ro_section_infos: vec![],
             calls: HashMap::default(),
+            syscall_registry: SyscallRegistry::default(),
+            compiled_program: None,
         }
     }
+
     /// Fully loads an ELF, including validation and relocation
-    pub fn load(bytes: &[u8]) -> Result<Self, ELFError> {
+    pub fn load(config: Config, bytes: &[u8]) -> Result<Self, ELFError> {
         let elf = Elf::parse(bytes)?;
         let mut elf_bytes = bytes.to_vec();
         Self::validate(&elf, &elf_bytes)?;
@@ -313,11 +352,14 @@ impl EBpfElf {
             .collect();
 
         Ok(Self {
+            config,
             elf_bytes,
             entrypoint,
             text_section_info,
             ro_section_infos,
             calls,
+            syscall_registry: SyscallRegistry::default(),
+            compiled_program: None,
         })
     }
 
@@ -561,10 +603,11 @@ impl EBpfElf {
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::{ebpf, fuzz::fuzz, user_error::UserError};
+    use crate::{ebpf, fuzz::fuzz, user_error::UserError, vm::DefaultInstructionMeter};
     use elf::scroll::Pwrite;
     use rand::{distributions::Uniform, Rng};
     use std::{collections::HashMap, fs::File, io::Read};
+    type ElfExecutable = EBpfElf<UserError, DefaultInstructionMeter>;
 
     #[test]
     fn test_validate() {
@@ -575,27 +618,27 @@ mod test {
         let mut parsed_elf = Elf::parse(&bytes).unwrap();
         let elf_bytes = bytes.to_vec();
 
-        EBpfElf::validate(&parsed_elf, &elf_bytes).expect("validation failed");
+        ElfExecutable::validate(&parsed_elf, &elf_bytes).expect("validation failed");
         parsed_elf.header.e_ident[EI_CLASS] = ELFCLASS32;
-        EBpfElf::validate(&parsed_elf, &elf_bytes).expect_err("allowed bad class");
+        ElfExecutable::validate(&parsed_elf, &elf_bytes).expect_err("allowed bad class");
         parsed_elf.header.e_ident[EI_CLASS] = ELFCLASS64;
-        EBpfElf::validate(&parsed_elf, &elf_bytes).expect("validation failed");
+        ElfExecutable::validate(&parsed_elf, &elf_bytes).expect("validation failed");
         parsed_elf.header.e_ident[EI_DATA] = ELFDATA2MSB;
-        EBpfElf::validate(&parsed_elf, &elf_bytes).expect_err("allowed big endian");
+        ElfExecutable::validate(&parsed_elf, &elf_bytes).expect_err("allowed big endian");
         parsed_elf.header.e_ident[EI_DATA] = ELFDATA2LSB;
-        EBpfElf::validate(&parsed_elf, &elf_bytes).expect("validation failed");
+        ElfExecutable::validate(&parsed_elf, &elf_bytes).expect("validation failed");
         parsed_elf.header.e_ident[EI_OSABI] = 1;
-        EBpfElf::validate(&parsed_elf, &elf_bytes).expect_err("allowed wrong abi");
+        ElfExecutable::validate(&parsed_elf, &elf_bytes).expect_err("allowed wrong abi");
         parsed_elf.header.e_ident[EI_OSABI] = ELFOSABI_NONE;
-        EBpfElf::validate(&parsed_elf, &elf_bytes).expect("validation failed");
+        ElfExecutable::validate(&parsed_elf, &elf_bytes).expect("validation failed");
         parsed_elf.header.e_machine = EM_QDSP6;
-        EBpfElf::validate(&parsed_elf, &elf_bytes).expect_err("allowed wrong machine");
+        ElfExecutable::validate(&parsed_elf, &elf_bytes).expect_err("allowed wrong machine");
         parsed_elf.header.e_machine = EM_BPF;
-        EBpfElf::validate(&parsed_elf, &elf_bytes).expect("validation failed");
+        ElfExecutable::validate(&parsed_elf, &elf_bytes).expect("validation failed");
         parsed_elf.header.e_type = ET_REL;
-        EBpfElf::validate(&parsed_elf, &elf_bytes).expect_err("allowed wrong type");
+        ElfExecutable::validate(&parsed_elf, &elf_bytes).expect_err("allowed wrong type");
         parsed_elf.header.e_type = ET_DYN;
-        EBpfElf::validate(&parsed_elf, &elf_bytes).expect("validation failed");
+        ElfExecutable::validate(&parsed_elf, &elf_bytes).expect("validation failed");
     }
 
     #[test]
@@ -604,7 +647,7 @@ mod test {
         let mut elf_bytes = Vec::new();
         file.read_to_end(&mut elf_bytes)
             .expect("failed to read elf file");
-        EBpfElf::load(&elf_bytes).expect("validation failed");
+        ElfExecutable::load(Config::default(), &elf_bytes).expect("validation failed");
     }
 
     #[test]
@@ -613,10 +656,10 @@ mod test {
         let mut elf_bytes = Vec::new();
         file.read_to_end(&mut elf_bytes)
             .expect("failed to read elf file");
-        let elf = EBpfElf::load(&elf_bytes).expect("validation failed");
+        let elf = ElfExecutable::load(Config::default(), &elf_bytes).expect("validation failed");
         let mut parsed_elf = Elf::parse(&elf_bytes).unwrap();
         let initial_e_entry = parsed_elf.header.e_entry;
-        let executable: &dyn Executable<UserError> = &elf;
+        let executable: &dyn Executable<UserError, DefaultInstructionMeter> = &elf;
         assert_eq!(
             0,
             executable
@@ -627,8 +670,8 @@ mod test {
         parsed_elf.header.e_entry += 8;
         let mut elf_bytes = elf_bytes.clone();
         elf_bytes.pwrite(parsed_elf.header, 0).unwrap();
-        let elf = EBpfElf::load(&elf_bytes).expect("validation failed");
-        let executable: &dyn Executable<UserError> = &elf;
+        let elf = ElfExecutable::load(Config::default(), &elf_bytes).expect("validation failed");
+        let executable: &dyn Executable<UserError, DefaultInstructionMeter> = &elf;
         assert_eq!(
             1,
             executable
@@ -641,7 +684,7 @@ mod test {
         elf_bytes.pwrite(parsed_elf.header, 0).unwrap();
         assert_eq!(
             Err(ELFError::EntrypointOutOfBounds),
-            EBpfElf::load(&elf_bytes)
+            ElfExecutable::load(Config::default(), &elf_bytes)
         );
 
         parsed_elf.header.e_entry = std::u64::MAX;
@@ -649,19 +692,22 @@ mod test {
         elf_bytes.pwrite(parsed_elf.header, 0).unwrap();
         assert_eq!(
             Err(ELFError::EntrypointOutOfBounds),
-            EBpfElf::load(&elf_bytes)
+            ElfExecutable::load(Config::default(), &elf_bytes)
         );
 
         parsed_elf.header.e_entry = initial_e_entry + ebpf::INSN_SIZE as u64 + 1;
         let mut elf_bytes = elf_bytes;
         elf_bytes.pwrite(parsed_elf.header, 0).unwrap();
-        assert_eq!(Err(ELFError::InvalidEntrypoint), EBpfElf::load(&elf_bytes));
+        assert_eq!(
+            Err(ELFError::InvalidEntrypoint),
+            ElfExecutable::load(Config::default(), &elf_bytes)
+        );
 
         parsed_elf.header.e_entry = initial_e_entry;
         let mut elf_bytes = elf_bytes;
         elf_bytes.pwrite(parsed_elf.header, 0).unwrap();
-        let elf = EBpfElf::load(&elf_bytes).expect("validation failed");
-        let executable: &dyn Executable<UserError> = &elf;
+        let elf = ElfExecutable::load(Config::default(), &elf_bytes).expect("validation failed");
+        let executable: &dyn Executable<UserError, DefaultInstructionMeter> = &elf;
         assert_eq!(
             0,
             executable
@@ -683,7 +729,7 @@ mod test {
             0xb7, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
             0x85, 0x10, 0x00, 0x00, 0xfe, 0xff, 0xff, 0xff];
 
-        EBpfElf::fixup_relative_calls(&mut calls, &mut prog).unwrap();
+        ElfExecutable::fixup_relative_calls(&mut calls, &mut prog).unwrap();
         let key = ebpf::hash_symbol_name(&[5, 0, 0, 0, 0, 0, 0, 0]);
         let insn = ebpf::Insn {
             opc: 0x85,
@@ -698,7 +744,7 @@ mod test {
         // // call +6
         let mut calls: HashMap<u32, usize> = HashMap::new();
         prog.splice(44.., vec![0xfa, 0xff, 0xff, 0xff]);
-        EBpfElf::fixup_relative_calls(&mut calls, &mut prog).unwrap();
+        ElfExecutable::fixup_relative_calls(&mut calls, &mut prog).unwrap();
         let key = ebpf::hash_symbol_name(&[5, 0, 0, 0, 0, 0, 0, 0]);
         let insn = ebpf::Insn {
             opc: 0x85,
@@ -724,7 +770,7 @@ mod test {
             0xb7, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
             0xb7, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00];
 
-        EBpfElf::fixup_relative_calls(&mut calls, &mut prog).unwrap();
+        ElfExecutable::fixup_relative_calls(&mut calls, &mut prog).unwrap();
         let key = ebpf::hash_symbol_name(&[0, 0, 0, 0, 0, 0, 0, 0]);
         let insn = ebpf::Insn {
             opc: 0x85,
@@ -739,7 +785,7 @@ mod test {
         // call +4
         let mut calls: HashMap<u32, usize> = HashMap::new();
         prog.splice(4..8, vec![0x04, 0x00, 0x00, 0x00]);
-        EBpfElf::fixup_relative_calls(&mut calls, &mut prog).unwrap();
+        ElfExecutable::fixup_relative_calls(&mut calls, &mut prog).unwrap();
         let key = ebpf::hash_symbol_name(&[0, 0, 0, 0, 0, 0, 0, 0]);
         let insn = ebpf::Insn {
             opc: 0x85,
@@ -768,7 +814,7 @@ mod test {
             0xb7, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
             0xb7, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00];
 
-        EBpfElf::fixup_relative_calls(&mut calls, &mut prog).unwrap();
+        ElfExecutable::fixup_relative_calls(&mut calls, &mut prog).unwrap();
         let key = ebpf::hash_symbol_name(&[0]);
         let insn = ebpf::Insn {
             opc: 0x85,
@@ -797,7 +843,7 @@ mod test {
             0xb7, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
             0x85, 0x10, 0x00, 0x00, 0xf9, 0xff, 0xff, 0xff];
 
-        EBpfElf::fixup_relative_calls(&mut calls, &mut prog).unwrap();
+        ElfExecutable::fixup_relative_calls(&mut calls, &mut prog).unwrap();
         let key = ebpf::hash_symbol_name(&[5]);
         let insn = ebpf::Insn {
             opc: 0x85,
@@ -819,7 +865,7 @@ mod test {
         println!("random bytes");
         for _ in 0..1_000 {
             let elf_bytes: Vec<u8> = (0..100).map(|_| rng.sample(&range)).collect();
-            let _ = EBpfElf::load(&elf_bytes);
+            let _ = ElfExecutable::load(Config::default(), &elf_bytes);
         }
 
         // Take a real elf and mangle it
@@ -839,7 +885,7 @@ mod test {
             0..parsed_elf.header.e_ehsize as usize,
             0..255,
             |bytes: &mut [u8]| {
-                let _ = EBpfElf::load(bytes);
+                let _ = ElfExecutable::load(Config::default(), bytes);
             },
         );
 
@@ -852,7 +898,7 @@ mod test {
             parsed_elf.header.e_shoff as usize..elf_bytes.len(),
             0..255,
             |bytes: &mut [u8]| {
-                let _ = EBpfElf::load(bytes);
+                let _ = ElfExecutable::load(Config::default(), bytes);
             },
         );
 
@@ -865,7 +911,7 @@ mod test {
             0..elf_bytes.len(),
             0..255,
             |bytes: &mut [u8]| {
-                let _ = EBpfElf::load(bytes);
+                let _ = ElfExecutable::load(Config::default(), bytes);
             },
         );
     }

@@ -8,7 +8,7 @@ extern crate solana_rbpf;
 use solana_rbpf::{
     syscalls,
     user_error::UserError,
-    vm::{Config, DefaultInstructionMeter, EbpfVm, Executable, Syscall},
+    vm::{Config, DefaultInstructionMeter, EbpfVm, Executable, SyscallObject, SyscallRegistry},
 };
 
 // The main objectives of this example is to show:
@@ -42,14 +42,14 @@ fn main() {
     ];
 
     // Create a VM: this one takes no data. Load prog1 in it.
-    let executable = Executable::<UserError>::from_text_bytes(prog1, None).unwrap();
-    let mut vm = EbpfVm::<UserError, DefaultInstructionMeter>::new(
-        executable.as_ref(),
+    let executable = Executable::<UserError, DefaultInstructionMeter>::from_text_bytes(
+        prog1,
+        None,
         Config::default(),
-        &[],
-        &[],
     )
     .unwrap();
+    let mut vm =
+        EbpfVm::<UserError, DefaultInstructionMeter>::new(executable.as_ref(), &[], &[]).unwrap();
     // Execute prog1.
     assert_eq!(
         vm.execute_program_interpreted(&mut DefaultInstructionMeter {})
@@ -64,29 +64,35 @@ fn main() {
     // In the following example we use a syscall to get the elapsed time since boot time: we
     // reimplement uptime in eBPF, in Rust. Because why not.
 
-    let executable = Executable::<UserError>::from_text_bytes(prog2, None).unwrap();
-    let mut vm = EbpfVm::<UserError, DefaultInstructionMeter>::new(
-        executable.as_ref(),
+    let mut executable = Executable::<UserError, DefaultInstructionMeter>::from_text_bytes(
+        prog2,
+        None,
         Config::default(),
-        &[],
-        &[],
     )
     .unwrap();
-    vm.register_syscall(
-        syscalls::BPF_KTIME_GETNS_IDX,
-        Syscall::Function(syscalls::bpf_time_getns),
-    )
-    .unwrap();
-
-    let time;
-
+    let mut syscall_registry = SyscallRegistry::default();
+    syscall_registry
+        .register_syscall_by_hash::<UserError, _>(
+            syscalls::BPF_KTIME_GETNS_IDX,
+            syscalls::BpfTimeGetNs::call,
+        )
+        .unwrap();
+    executable.set_syscall_registry(syscall_registry);
     #[cfg(not(windows))]
     {
-        vm.jit_compile().unwrap();
-        time = unsafe {
-            vm.execute_program_jit(&mut DefaultInstructionMeter {})
-                .unwrap()
-        };
+        executable.jit_compile().unwrap();
+    }
+    let mut vm =
+        EbpfVm::<UserError, DefaultInstructionMeter>::new(executable.as_ref(), &[], &[]).unwrap();
+    vm.bind_syscall_context_object(Box::new(syscalls::BpfTimeGetNs {}))
+        .unwrap();
+
+    let time;
+    #[cfg(not(windows))]
+    {
+        time = vm
+            .execute_program_jit(&mut DefaultInstructionMeter {})
+            .unwrap();
     }
 
     #[cfg(windows)]

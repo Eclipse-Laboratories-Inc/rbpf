@@ -19,17 +19,16 @@
 extern crate byteorder;
 extern crate libc;
 extern crate solana_rbpf;
+extern crate test_utils;
 
-use libc::c_char;
 use solana_rbpf::{
-    error::EbpfError,
     fuzz::fuzz,
-    memory_region::{AccessType, MemoryMapping},
     user_error::UserError,
     verifier::check,
-    vm::{Config, DefaultInstructionMeter, EbpfVm, Executable, Syscall},
+    vm::{Config, DefaultInstructionMeter, EbpfVm, Executable, SyscallObject, SyscallRegistry},
 };
-use std::{fs::File, io::Read, slice::from_raw_parts, str::from_utf8};
+use std::{fs::File, io::Read};
+use test_utils::{BpfSyscallString, BpfSyscallU64};
 
 // The following two examples have been compiled from C with the following command:
 //
@@ -97,46 +96,6 @@ use std::{fs::File, io::Read, slice::from_raw_parts, str::from_utf8};
 // Cargo.toml file (see comments above), so here we use just the hardcoded bytecode instructions
 // instead.
 
-type ExecResult = Result<u64, EbpfError<UserError>>;
-
-fn bpf_syscall_string(
-    vm_addr: u64,
-    len: u64,
-    _arg3: u64,
-    _arg4: u64,
-    _arg5: u64,
-    memory_mapping: &MemoryMapping,
-) -> ExecResult {
-    let host_addr = memory_mapping.map(AccessType::Load, vm_addr, len)?;
-    let c_buf: *const c_char = host_addr as *const c_char;
-    unsafe {
-        for i in 0..len {
-            let c = std::ptr::read(c_buf.offset(i as isize));
-            if c == 0 {
-                break;
-            }
-        }
-        let message = from_utf8(from_raw_parts(host_addr as *const u8, len as usize)).unwrap();
-        println!("log: {}", message);
-    }
-    Ok(0)
-}
-
-fn bpf_syscall_u64(
-    arg1: u64,
-    arg2: u64,
-    arg3: u64,
-    arg4: u64,
-    arg5: u64,
-    memory_mapping: &MemoryMapping,
-) -> ExecResult {
-    println!(
-        "dump_64: {:#x}, {:#x}, {:#x}, {:#x}, {:#x}, {:?}",
-        arg1, arg2, arg3, arg4, arg5, memory_mapping as *const _
-    );
-    Ok(0)
-}
-
 #[test]
 #[ignore]
 fn test_fuzz_execute() {
@@ -156,17 +115,28 @@ fn test_fuzz_execute() {
         0..elf.len(),
         0..255,
         |bytes: &mut [u8]| {
-            if let Ok(executable) = Executable::<UserError>::from_elf(&bytes, Some(user_check)) {
+            if let Ok(mut executable) = Executable::<UserError, DefaultInstructionMeter>::from_elf(
+                &bytes,
+                Some(user_check),
+                Config::default(),
+            ) {
+                let mut syscall_registry = SyscallRegistry::default();
+                syscall_registry
+                    .register_syscall_by_name::<UserError, _>(b"log", BpfSyscallString::call)
+                    .unwrap();
+                syscall_registry
+                    .register_syscall_by_name::<UserError, _>(b"log_64", BpfSyscallU64::call)
+                    .unwrap();
+                executable.set_syscall_registry(syscall_registry);
                 let mut vm = EbpfVm::<UserError, DefaultInstructionMeter>::new(
                     executable.as_ref(),
-                    Config::default(),
                     &[],
                     &[],
                 )
                 .unwrap();
-                vm.register_syscall_ex("log", Syscall::Function(bpf_syscall_string))
+                vm.bind_syscall_context_object(Box::new(BpfSyscallString {}))
                     .unwrap();
-                vm.register_syscall_ex("log_64", Syscall::Function(bpf_syscall_u64))
+                vm.bind_syscall_context_object(Box::new(BpfSyscallU64 {}))
                     .unwrap();
                 let _ = vm.execute_program_interpreted(&mut DefaultInstructionMeter {});
             }

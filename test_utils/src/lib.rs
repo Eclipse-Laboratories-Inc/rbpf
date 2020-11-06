@@ -13,8 +13,9 @@ extern crate solana_rbpf;
 
 use self::libc::c_char;
 use solana_rbpf::{
-    error::{EbpfError, UserDefinedError},
+    error::EbpfError,
     memory_region::{AccessType, MemoryMapping},
+    question_mark,
     user_error::UserError,
     vm::{InstructionMeter, SyscallObject},
 };
@@ -35,61 +36,54 @@ impl InstructionMeter for TestInstructionMeter {
     }
 }
 
-pub type ExecResult = Result<u64, EbpfError<UserError>>;
+pub type Result = std::result::Result<u64, EbpfError<UserError>>;
 
-pub fn bpf_trace_printf<E: UserDefinedError>(
-    _arg1: u64,
-    _arg2: u64,
-    _arg3: u64,
-    _arg4: u64,
-    _arg5: u64,
-    _memory_mapping: &MemoryMapping,
-) -> Result<u64, EbpfError<E>> {
-    Ok(0)
-}
-
-pub fn bpf_syscall_string(
-    vm_addr: u64,
-    len: u64,
-    _arg3: u64,
-    _arg4: u64,
-    _arg5: u64,
-    memory_mapping: &MemoryMapping,
-) -> ExecResult {
-    let host_addr = memory_mapping.map(AccessType::Load, vm_addr, len)?;
-    let c_buf: *const c_char = host_addr as *const c_char;
-    unsafe {
-        for i in 0..len {
-            let c = std::ptr::read(c_buf.offset(i as isize));
-            if c == 0 {
-                break;
-            }
-        }
-        let message = from_utf8(from_raw_parts(host_addr as *const u8, len as usize)).unwrap();
-        println!("log: {}", message);
+pub struct BpfTracePrintf {}
+impl SyscallObject<UserError> for BpfTracePrintf {
+    fn call(
+        &mut self,
+        _arg1: u64,
+        _arg2: u64,
+        _arg3: u64,
+        _arg4: u64,
+        _arg5: u64,
+        _memory_mapping: &MemoryMapping,
+        result: &mut Result,
+    ) {
+        *result = Result::Ok(0);
     }
-    Ok(0)
 }
 
-pub fn bpf_syscall_u64(
-    arg1: u64,
-    arg2: u64,
-    arg3: u64,
-    arg4: u64,
-    arg5: u64,
-    memory_mapping: &MemoryMapping,
-) -> ExecResult {
-    println!(
-        "dump_64: {:#x}, {:#x}, {:#x}, {:#x}, {:#x}, {:?}",
-        arg1, arg2, arg3, arg4, arg5, memory_mapping as *const _
-    );
-    Ok(0)
+pub struct BpfSyscallString {}
+impl SyscallObject<UserError> for BpfSyscallString {
+    fn call(
+        &mut self,
+        vm_addr: u64,
+        len: u64,
+        _arg3: u64,
+        _arg4: u64,
+        _arg5: u64,
+        memory_mapping: &MemoryMapping,
+        result: &mut Result,
+    ) {
+        let host_addr = question_mark!(memory_mapping.map(AccessType::Load, vm_addr, len), result);
+        let c_buf: *const c_char = host_addr as *const c_char;
+        unsafe {
+            for i in 0..len {
+                let c = std::ptr::read(c_buf.offset(i as isize));
+                if c == 0 {
+                    break;
+                }
+            }
+            let message = from_utf8(from_raw_parts(host_addr as *const u8, len as usize)).unwrap();
+            println!("log: {}", message);
+        }
+        *result = Result::Ok(0);
+    }
 }
 
-pub struct SyscallWithContext<'a> {
-    pub context: &'a mut u64,
-}
-impl<'a> SyscallObject<UserError> for SyscallWithContext<'a> {
+pub struct BpfSyscallU64 {}
+impl SyscallObject<UserError> for BpfSyscallU64 {
     fn call(
         &mut self,
         arg1: u64,
@@ -98,14 +92,37 @@ impl<'a> SyscallObject<UserError> for SyscallWithContext<'a> {
         arg4: u64,
         arg5: u64,
         memory_mapping: &MemoryMapping,
-    ) -> ExecResult {
+        result: &mut Result,
+    ) {
+        println!(
+            "dump_64: {:#x}, {:#x}, {:#x}, {:#x}, {:#x}, {:?}",
+            arg1, arg2, arg3, arg4, arg5, memory_mapping as *const _
+        );
+        *result = Result::Ok(0);
+    }
+}
+
+pub struct SyscallWithContext {
+    pub context: u64,
+}
+impl SyscallObject<UserError> for SyscallWithContext {
+    fn call(
+        &mut self,
+        arg1: u64,
+        arg2: u64,
+        arg3: u64,
+        arg4: u64,
+        arg5: u64,
+        memory_mapping: &MemoryMapping,
+        result: &mut Result,
+    ) {
         println!(
             "SyscallWithContext: {:?}, {:#x}, {:#x}, {:#x}, {:#x}, {:#x}, {:?}",
             self as *const _, arg1, arg2, arg3, arg4, arg5, memory_mapping as *const _
         );
-        assert_eq!(*self.context, 42);
-        *self.context = 84;
-        Ok(0)
+        assert_eq!(self.context, 42);
+        self.context = 84;
+        *result = Result::Ok(0);
     }
 }
 
