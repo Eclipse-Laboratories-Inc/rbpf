@@ -1,18 +1,14 @@
 [package]
-
-# Project metadata
 name = "solana_rbpf"
 version = "0.2.0"
-authors = ["Solana Maintainers <maintainers@solana.com>"]
-
-# Additional metadata for packaging
 description = "Virtual machine and JIT compiler for eBPF programs"
+authors = ["Solana Maintainers <maintainers@solana.foundation>"]
 repository = "https://github.com/solana-labs/rbpf"
-readme = "README.md"
+homepage = "https://solana.com/"
 keywords = ["BPF", "eBPF", "interpreter", "JIT", "filtering"]
-license = "Apache-2.0/MIT"
+license = "Apache-2.0"
+edition = "2018"
 
-# Packaging directives
 include = [
     "src/**",
     "examples/**",
@@ -23,7 +19,6 @@ include = [
 ]
 
 [dependencies]
-
 byteorder = "1.2"
 combine = "2.5"
 goblin = "0.2.2"
@@ -36,7 +31,6 @@ thiserror = "1.0"
 time = "0.1"
 
 [dev-dependencies]
-
 elf = "0.0.10"
 json = "0.11"
 test_utils = { path = "test_utils/" }
