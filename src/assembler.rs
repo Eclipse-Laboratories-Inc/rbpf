@@ -10,10 +10,11 @@ use self::InstructionType::{
     AluBinary, AluUnary, CallImm, CallReg, Endian, JumpConditional, JumpUnconditional, LoadAbs,
     LoadImm, LoadInd, LoadReg, NoOperand, StoreImm, StoreReg,
 };
-use asm_parser::Operand::{Integer, Memory, Nil, Register};
-use asm_parser::{parse, Instruction, Operand};
-use ebpf;
-use ebpf::Insn;
+use crate::asm_parser::{
+    parse, Instruction, Operand,
+    Operand::{Integer, Memory, Nil, Register},
+};
+use crate::ebpf::{self, Insn};
 use std::collections::HashMap;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -142,7 +143,7 @@ fn make_instruction_map() -> HashMap<String, (InstructionType, u8)> {
 }
 
 fn insn(opc: u8, dst: i64, src: i64, off: i64, imm: i64) -> Result<Insn, String> {
-    if dst < 0 || dst >= 16 {
+    if !(0..16).contains(&dst) {
         return Err(format!("Invalid destination register {}", dst));
     }
     if dst < 0 || src >= 16 {
