@@ -19,7 +19,7 @@ use crate::{
     memory_region::{AccessType, MemoryMapping, MemoryRegion},
     user_error::UserError,
 };
-use log::{debug, log_enabled, trace};
+use log::debug;
 use std::{collections::HashMap, fmt::Debug, u32};
 
 /// eBPF verification function that returns an error if the program does not meet its requirements.
@@ -172,12 +172,18 @@ pub struct Config {
     pub max_call_depth: usize,
     /// Size of a stack frame in bytes, must match the size specified in the LLVM BPF backend
     pub stack_frame_size: usize,
+    /// Enable instruction meter and limiting
+    pub enable_instruction_meter: bool,
+    /// Enable instruction tracing
+    pub enable_instruction_tracing: bool,
 }
 impl Default for Config {
     fn default() -> Self {
         Self {
             max_call_depth: 20,
             stack_frame_size: 4_096,
+            enable_instruction_meter: true,
+            enable_instruction_tracing: false,
         }
     }
 }
@@ -252,6 +258,55 @@ impl InstructionMeter for DefaultInstructionMeter {
     }
 }
 
+/// Used for instruction tracing
+#[derive(Default, Clone)]
+pub struct Tracer {
+    /// Contains the state at every instruction in order of execution
+    pub log: Vec<[u64; 12]>,
+}
+
+impl Tracer {
+    /// Logs the state of a single instruction
+    pub fn trace(&mut self, state: [u64; 12]) {
+        self.log.push(state);
+    }
+
+    /// Use this method to print the log of this tracer
+    pub fn write<W: std::fmt::Write>(
+        &self,
+        out: &mut W,
+        program: &[u8],
+    ) -> Result<(), std::fmt::Error> {
+        let disassembled = disassembler::to_insn_vec(program);
+        let mut pc_to_instruction_index =
+            vec![0usize; disassembled.last().map(|ins| ins.ptr + 1).unwrap_or(0)];
+        for index in 0..disassembled.len() {
+            pc_to_instruction_index[disassembled[index].ptr] = index;
+        }
+        for index in 0..self.log.len() {
+            let entry = &self.log[index];
+            let ins_index = pc_to_instruction_index[entry[11] as usize];
+            writeln!(
+                out,
+                "{:5?} {:016X?} {:5?}: {}",
+                index, entry, ins_index, disassembled[ins_index].desc
+            )?;
+        }
+        Ok(())
+    }
+
+    /// Compares an interpreter trace and a JIT trace.
+    /// The log of the JIT can be longer because it only validates the instruction meter at branches.
+    pub fn compare(interpreter: &Self, jit: &Self) -> bool {
+        let interpreter = interpreter.log.as_slice();
+        let mut jit = jit.log.as_slice();
+        if jit.len() > interpreter.len() {
+            jit = &jit[0..interpreter.len()];
+        }
+        interpreter == jit
+    }
+}
+
 /// Translates a vm_addr into a host_addr and sets the pc in the error if one occurs
 macro_rules! translate_memory_access {
     ( $self:ident, $vm_addr:ident, $access_type:expr, $pc:ident, $T:ty ) => {
@@ -274,6 +329,9 @@ macro_rules! translate_memory_access {
         }
     };
 }
+
+/// The syscall_context_objects field also stores some metadata in the front, thus the entries are shifted
+pub const SYSCALL_CONTEXT_OBJECTS_OFFSET: usize = 3;
 
 /// A virtual machine to run eBPF program.
 ///
@@ -302,6 +360,7 @@ pub struct EbpfVm<'a, E: UserDefinedError, I: InstructionMeter> {
     program: &'a [u8],
     program_vm_addr: u64,
     memory_mapping: MemoryMapping,
+    tracer: Tracer,
     syscall_context_objects: Vec<*mut u8>,
     syscall_context_object_pool: Vec<Box<dyn SyscallObject<E> + 'a>>,
     frames: CallFrames,
@@ -360,32 +419,45 @@ impl<'a, E: UserDefinedError, I: InstructionMeter> EbpfVm<'a, E, I> {
             0,
             false,
         ));
-        let memory_mapping = MemoryMapping::new_from_regions(regions);
         let number_of_syscalls = executable.get_syscall_registry().get_number_of_syscalls();
-        let mut syscall_context_objects = vec![std::ptr::null_mut(); 2 + number_of_syscalls];
-        unsafe {
-            libc::memcpy(
-                syscall_context_objects.as_mut_ptr() as _,
-                std::mem::transmute::<_, _>(&memory_mapping),
-                std::mem::size_of::<MemoryMapping>(),
-            );
-        }
-        Ok(EbpfVm {
+        let mut vm = EbpfVm {
             executable,
             program,
             program_vm_addr,
-            memory_mapping,
-            syscall_context_objects,
+            memory_mapping: MemoryMapping::new_from_regions(regions),
+            tracer: Tracer::default(),
+            syscall_context_objects: vec![
+                std::ptr::null_mut();
+                SYSCALL_CONTEXT_OBJECTS_OFFSET + number_of_syscalls
+            ],
             syscall_context_object_pool: Vec::with_capacity(number_of_syscalls),
             frames,
             last_insn_count: 0,
             total_insn_count: 0,
-        })
+        };
+        unsafe {
+            libc::memcpy(
+                vm.syscall_context_objects.as_mut_ptr() as _,
+                std::mem::transmute::<_, _>(&vm.memory_mapping),
+                std::mem::size_of::<MemoryMapping>(),
+            );
+        }
+        Ok(vm)
     }
 
     /// Returns the number of instructions executed by the last program.
     pub fn get_total_instruction_count(&self) -> u64 {
         self.total_insn_count
+    }
+
+    /// Returns the program
+    pub fn get_program(&self) -> &[u8] {
+        &self.program
+    }
+
+    /// Returns the tracer
+    pub fn get_tracer(&self) -> &Tracer {
+        &self.tracer
     }
 
     /// Bind a context object instance to a previously registered syscall
@@ -435,10 +507,10 @@ impl<'a, E: UserDefinedError, I: InstructionMeter> EbpfVm<'a, E, I> {
             .get_syscall_registry()
             .lookup_context_object_slot(vtable.call as u64)
             .unwrap();
-        if !self.syscall_context_objects[2 + slot].is_null() {
+        if !self.syscall_context_objects[SYSCALL_CONTEXT_OBJECTS_OFFSET + slot].is_null() {
             Err(EbpfError::SycallAlreadyBound)
         } else {
-            self.syscall_context_objects[2 + slot] = fat_ptr.data;
+            self.syscall_context_objects[SYSCALL_CONTEXT_OBJECTS_OFFSET + slot] = fat_ptr.data;
             // Keep the dyn trait objects so that they can be dropped properly later
             self.syscall_context_object_pool
                 .push(syscall_context_object);
@@ -451,7 +523,7 @@ impl<'a, E: UserDefinedError, I: InstructionMeter> EbpfVm<'a, E, I> {
         self.executable
             .get_syscall_registry()
             .lookup_context_object_slot(syscall_function as u64)
-            .map(|slot| self.syscall_context_objects[2 + slot])
+            .map(|slot| self.syscall_context_objects[SYSCALL_CONTEXT_OBJECTS_OFFSET + slot])
     }
 
     /// Execute the program loaded, with the given packet data.
@@ -480,10 +552,16 @@ impl<'a, E: UserDefinedError, I: InstructionMeter> EbpfVm<'a, E, I> {
     /// assert_eq!(res, 0);
     /// ```
     pub fn execute_program_interpreted(&mut self, instruction_meter: &mut I) -> ProgramResult<E> {
-        let initial_insn_count = instruction_meter.get_remaining();
+        let initial_insn_count = if self.executable.get_config().enable_instruction_meter {
+            instruction_meter.get_remaining()
+        } else {
+            0
+        };
         let result = self.execute_program_interpreted_inner(instruction_meter);
-        instruction_meter.consume(self.last_insn_count);
-        self.total_insn_count = initial_insn_count - instruction_meter.get_remaining();
+        if self.executable.get_config().enable_instruction_meter {
+            instruction_meter.consume(self.last_insn_count);
+            self.total_insn_count = initial_insn_count - instruction_meter.get_remaining();
+        }
         result
     }
 
@@ -501,13 +579,14 @@ impl<'a, E: UserDefinedError, I: InstructionMeter> EbpfVm<'a, E, I> {
             reg[1] = ebpf::MM_INPUT_START;
         }
 
-        // Check trace logging outside the instruction loop, saves ~30%
-        let insn_trace = log_enabled!(log::Level::Trace);
+        // Check config outside of the instruction loop
+        let instruction_meter_enabled = self.executable.get_config().enable_instruction_meter;
+        let instruction_tracing_enabled = self.executable.get_config().enable_instruction_tracing;
 
         // Loop on instructions
         let entry = self.executable.get_entrypoint_instruction_offset()?;
         let mut next_pc: usize = entry;
-        let mut remaining_insn_count = instruction_meter.get_remaining();
+        let mut remaining_insn_count = if instruction_meter_enabled { instruction_meter.get_remaining() } else { 0 };
         let initial_insn_count = remaining_insn_count;
         self.last_insn_count = 0;
         while next_pc * ebpf::INSN_SIZE + ebpf::INSN_SIZE <= self.program.len() {
@@ -518,15 +597,11 @@ impl<'a, E: UserDefinedError, I: InstructionMeter> EbpfVm<'a, E, I> {
             let src = insn.src as usize;
             self.last_insn_count += 1;
 
-            if insn_trace {
-                trace!(
-                    "    BPF: {:5?} {:016x?} frame {:?} pc {:4?} {}",
-                    self.last_insn_count,
-                    reg,
-                    self.frames.get_frame_index(),
-                    pc + ebpf::ELF_INSN_DUMP_OFFSET,
-                    disassembler::to_insn_vec(&self.program[pc * ebpf::INSN_SIZE..])[0].desc
-                );
+            if instruction_tracing_enabled {
+                let mut state = [0u64; 12];
+                state[0..11].copy_from_slice(&reg);
+                state[11] = pc as u64;
+                self.tracer.trace(state);
             }
 
             match insn.opc {
@@ -776,11 +851,13 @@ impl<'a, E: UserDefinedError, I: InstructionMeter> EbpfVm<'a, E, I> {
                 // changed after the program has been verified.
                 ebpf::CALL_IMM => {
                     if let Some(syscall) = self.executable.get_syscall_registry().lookup_syscall(insn.imm as u32) {
-                        let _ = instruction_meter.consume(self.last_insn_count);
+                        if instruction_meter_enabled {
+                            let _ = instruction_meter.consume(self.last_insn_count);
+                        }
                         self.last_insn_count = 0;
                         let mut result: ProgramResult<E> = Ok(0);
                         (unsafe { std::mem::transmute::<u64, SyscallFunction::<E, *mut u8>>(syscall.function) })(
-                            self.syscall_context_objects[2 + syscall.context_object_slot],
+                            self.syscall_context_objects[SYSCALL_CONTEXT_OBJECTS_OFFSET + syscall.context_object_slot],
                             reg[1],
                             reg[2],
                             reg[3],
@@ -790,7 +867,9 @@ impl<'a, E: UserDefinedError, I: InstructionMeter> EbpfVm<'a, E, I> {
                             &mut result,
                         );
                         reg[0] = result?;
-                        remaining_insn_count = instruction_meter.get_remaining();
+                        if instruction_meter_enabled {
+                            remaining_insn_count = instruction_meter.get_remaining();
+                        }
                     } else if let Some(new_pc) = self.executable.lookup_bpf_call(insn.imm as u32) {
                         // make BPF to BPF call
                         reg[ebpf::STACK_REG] = self.frames.push(
@@ -826,7 +905,7 @@ impl<'a, E: UserDefinedError, I: InstructionMeter> EbpfVm<'a, E, I> {
                 }
                 _ => return Err(EbpfError::UnsupportedInstruction(pc + ebpf::ELF_INSN_DUMP_OFFSET)),
             }
-            if self.last_insn_count >= remaining_insn_count {
+            if instruction_meter_enabled && self.last_insn_count >= remaining_insn_count {
                 return Err(EbpfError::ExceededMaxInstructions(pc + 1 + ebpf::ELF_INSN_DUMP_OFFSET, initial_insn_count));
             }
         }
@@ -876,13 +955,18 @@ impl<'a, E: UserDefinedError, I: InstructionMeter> EbpfVm<'a, E, I> {
         } else {
             0
         };
-        let initial_insn_count = instruction_meter.get_remaining();
+        let initial_insn_count = if self.executable.get_config().enable_instruction_meter {
+            instruction_meter.get_remaining()
+        } else {
+            0
+        };
         let result: ProgramResult<E> = Ok(0);
         let compiled_program = self
             .executable
             .get_compiled_program()
             .ok_or(EbpfError::JITNotCompiled)?;
         unsafe {
+            self.syscall_context_objects[2] = &mut self.tracer as *mut _ as *mut u8;
             self.last_insn_count = (compiled_program.main)(
                 &result,
                 reg1,
@@ -891,10 +975,12 @@ impl<'a, E: UserDefinedError, I: InstructionMeter> EbpfVm<'a, E, I> {
             )
             .max(0) as u64;
         }
-        let remaining_insn_count = instruction_meter.get_remaining();
-        self.total_insn_count = remaining_insn_count - self.last_insn_count;
-        instruction_meter.consume(self.total_insn_count);
-        self.total_insn_count += initial_insn_count - remaining_insn_count;
+        if self.executable.get_config().enable_instruction_meter {
+            let remaining_insn_count = instruction_meter.get_remaining();
+            self.total_insn_count = remaining_insn_count - self.last_insn_count;
+            instruction_meter.consume(self.total_insn_count);
+            self.total_insn_count += initial_insn_count - remaining_insn_count;
+        }
         match result {
             Err(EbpfError::ExceededMaxInstructions(pc, _)) => {
                 Err(EbpfError::ExceededMaxInstructions(pc, initial_insn_count))
