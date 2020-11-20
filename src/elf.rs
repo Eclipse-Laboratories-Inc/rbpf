@@ -285,6 +285,30 @@ impl<E: UserDefinedError, I: InstructionMeter> Executable<E, I> for EBpfElf<E, I
         )
         .into())
     }
+
+    /// Get syscalls and BPF functions (if debug symbols are not stripped)
+    fn get_symbols(&self) -> (HashMap<u32, String>, HashMap<u64, (String, u64)>) {
+        let mut syscalls = HashMap::new();
+        let mut bpf_functions = HashMap::new();
+        if let Ok(elf) = Elf::parse(&self.elf_bytes) {
+            for symbol in &elf.dynsyms {
+                if symbol.st_info != 0x10 {
+                    continue;
+                }
+                let name = elf.dynstrtab.get(symbol.st_name).unwrap().unwrap();
+                let hash = ebpf::hash_symbol_name(&name.as_bytes());
+                syscalls.insert(hash, name.to_string());
+            }
+            for symbol in &elf.syms {
+                if symbol.st_info & 0xEF != 0x02 {
+                    continue;
+                }
+                let name = elf.strtab.get(symbol.st_name).unwrap().unwrap();
+                bpf_functions.insert(symbol.st_value, (name.to_string(), symbol.st_size));
+            }
+        }
+        (syscalls, bpf_functions)
+    }
 }
 
 impl<'a, E: UserDefinedError, I: InstructionMeter> EBpfElf<E, I> {
