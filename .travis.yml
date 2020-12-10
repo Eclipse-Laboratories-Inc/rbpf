@@ -33,6 +33,6 @@ deploy:
   on:
     tags: true
     repo: solana-labs/rbpf
-    branch: solana-master
+    branch: main
 after_deploy:
 - cargo publish --token "$CRATES_IO_TOKEN"
