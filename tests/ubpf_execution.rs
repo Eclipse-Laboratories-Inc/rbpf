@@ -2322,10 +2322,10 @@ fn test_call_reg() {
 }
 
 #[test]
-fn test_err_oob_callx_low() {
+fn test_err_callx_oob_low() {
     test_interpreter_and_jit_asm!(
         "
-        mov64 r0, 0x0
+        mov64 r0, 0x3
         callx 0x0
         exit",
         [],
@@ -2343,11 +2343,12 @@ fn test_err_oob_callx_low() {
 }
 
 #[test]
-fn test_err_oob_callx_high() {
+fn test_err_callx_oob_high() {
     test_interpreter_and_jit_asm!(
         "
         mov64 r0, -0x1
         lsh64 r0, 0x20
+        or64 r0, 0x3
         callx 0x0
         exit",
         [],
@@ -2356,11 +2357,34 @@ fn test_err_oob_callx_high() {
             |_vm, res: Result| {
                 matches!(res.unwrap_err(),
                     EbpfError::CallOutsideTextSegment(pc, target_pc)
-                    if pc == 31 && target_pc == 0xffffffff00000000
+                    if pc == 32 && target_pc == 0xffffffff00000000
                 )
             }
         },
-        3
+        4
+    );
+}
+
+#[test]
+fn test_err_callx_lddw() {
+    test_interpreter_and_jit_asm!(
+        "
+        mov64 r8, 0x1
+        lsh64 r8, 0x20
+        or64 r8, 40
+        callx 0x8
+        lddw r0, 0x1122334455667788
+        exit",
+        [],
+        (),
+        {
+            |_vm, res: Result| {
+                matches!(res.unwrap_err(),
+                    EbpfError::UnsupportedInstruction(pc) if pc == 34
+                )
+            }
+        },
+        5
     );
 }
 
