@@ -283,9 +283,10 @@ impl Tracer {
     ) -> Result<(), std::fmt::Error> {
         let disassembled = disassembler::to_insn_vec(program);
         let mut pc_to_instruction_index =
-            vec![0usize; disassembled.last().map(|ins| ins.ptr + 1).unwrap_or(0)];
+            vec![0usize; disassembled.last().map(|ins| ins.ptr + 2).unwrap_or(0)];
         for index in 0..disassembled.len() {
             pc_to_instruction_index[disassembled[index].ptr] = index;
+            pc_to_instruction_index[disassembled[index].ptr + 1] = index;
         }
         for index in 0..self.log.len() {
             let entry = &self.log[index];
@@ -983,7 +984,7 @@ impl<'a, E: UserDefinedError, I: InstructionMeter> EbpfVm<'a, E, I> {
         let compiled_program = self
             .executable
             .get_compiled_program()
-            .ok_or(EbpfError::JITNotCompiled)?;
+            .ok_or(EbpfError::JitNotCompiled)?;
         unsafe {
             self.syscall_context_objects[SYSCALL_CONTEXT_OBJECTS_OFFSET - 1] =
                 &mut self.tracer as *mut _ as *mut u8;

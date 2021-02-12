@@ -15,7 +15,7 @@ use rand::{rngs::SmallRng, RngCore, SeedableRng};
 use solana_rbpf::{
     assembler::assemble,
     ebpf::{self, hash_symbol_name},
-    elf::ELFError,
+    elf::ElfError,
     error::EbpfError,
     memory_region::AccessType,
     syscalls,
@@ -2870,7 +2870,7 @@ fn test_non_terminate_early() {
         {
             |_vm, res: Result| {
                 matches!(res.unwrap_err(),
-                    EbpfError::ELFError(ELFError::UnresolvedSymbol(a, b, c))
+                    EbpfError::ElfError(ElfError::UnresolvedSymbol(a, b, c))
                     if a == "Unknown" && b == 35 && c == 48
                 )
             }
@@ -2970,7 +2970,7 @@ fn test_err_symbol_unresolved() {
         [],
         (),
         {
-            |_vm, res: Result| matches!(res.unwrap_err(), EbpfError::ELFError(ELFError::UnresolvedSymbol(symbol, pc, offset)) if symbol == "Unknown" && pc == 29 && offset == 0)
+            |_vm, res: Result| matches!(res.unwrap_err(), EbpfError::ElfError(ElfError::UnresolvedSymbol(symbol, pc, offset)) if symbol == "Unknown" && pc == 29 && offset == 0)
         },
         1
     );
@@ -2990,7 +2990,7 @@ fn test_err_call_unresolved() {
         [],
         (),
         {
-            |_vm, res: Result| matches!(res.unwrap_err(), EbpfError::ELFError(ELFError::UnresolvedSymbol(symbol, pc, offset)) if symbol == "Unknown" && pc == 34 && offset == 40)
+            |_vm, res: Result| matches!(res.unwrap_err(), EbpfError::ElfError(ElfError::UnresolvedSymbol(symbol, pc, offset)) if symbol == "Unknown" && pc == 34 && offset == 40)
         },
         6
     );
@@ -3005,7 +3005,7 @@ fn test_err_unresolved_elf() {
             hash_symbol_name(b"log") => BpfSyscallString::call; BpfSyscallString {},
         ),
         {
-            |_vm, res: Result| matches!(res.unwrap_err(), EbpfError::ELFError(ELFError::UnresolvedSymbol(symbol, pc, offset)) if symbol == "log_64" && pc == 550 && offset == 4168)
+            |_vm, res: Result| matches!(res.unwrap_err(), EbpfError::ElfError(ElfError::UnresolvedSymbol(symbol, pc, offset)) if symbol == "log_64" && pc == 550 && offset == 4168)
         },
         9
     );
@@ -3221,72 +3221,52 @@ fn test_tcp_sack_nomatch() {
 
 #[test]
 fn test_large_program() {
-    fn write_insn(prog: &mut [u8], insn: usize, asm: &str) {
-        prog[insn * ebpf::INSN_SIZE..insn * ebpf::INSN_SIZE + ebpf::INSN_SIZE]
-            .copy_from_slice(&assemble(asm).unwrap());
+    fn write_insn(prog: &mut [u8], index: usize, asm: &str) {
+        let insn = assemble(asm).unwrap();
+        prog[index * ebpf::INSN_SIZE..index * ebpf::INSN_SIZE + insn.len()].copy_from_slice(&insn);
     }
 
-    let mut prog = vec![0; ebpf::PROG_MAX_INSNS * ebpf::INSN_SIZE];
-    let mut add_insn = vec![0; ebpf::INSN_SIZE];
-    write_insn(&mut add_insn, 0, "mov64 r0, 0");
-    for insn in (0..(ebpf::PROG_MAX_INSNS - 1) * ebpf::INSN_SIZE).step_by(ebpf::INSN_SIZE) {
-        prog[insn..insn + ebpf::INSN_SIZE].copy_from_slice(&add_insn);
-    }
-    write_insn(&mut prog, ebpf::PROG_MAX_INSNS - 1, "exit");
-
+    let mut prog = vec![0; (ebpf::PROG_MAX_INSNS * 2 - 1) * ebpf::INSN_SIZE];
+    let mut insn = vec![0; ebpf::INSN_SIZE * 2];
+    write_insn(&mut insn, 0, "lddw r0, 0");
+    for index in (0..(ebpf::PROG_MAX_INSNS - 1) * ebpf::INSN_SIZE * 2).step_by(ebpf::INSN_SIZE * 2)
     {
-        // Test jumping to pc larger then i16
-        write_insn(&mut prog, ebpf::PROG_MAX_INSNS - 2, "ja 0x0");
+        prog[index..index + ebpf::INSN_SIZE * 2].copy_from_slice(&insn);
+    }
+    write_insn(&mut prog, ebpf::PROG_MAX_INSNS - 4, "ja 9");
+    write_insn(&mut prog, ebpf::PROG_MAX_INSNS - 3, "mov r0, 0");
+    write_insn(&mut prog, ebpf::PROG_MAX_INSNS * 2 - 2, "exit");
 
-        let executable = Executable::<UserError, DefaultInstructionMeter>::from_text_bytes(
-            &prog,
-            None,
-            Config::default(),
-        )
-        .unwrap();
-        let mut vm =
-            EbpfVm::<UserError, DefaultInstructionMeter>::new(executable.as_ref(), &mut [], &[])
+    let config = Config {
+        enable_instruction_tracing: true,
+        ..Config::default()
+    };
+
+    #[allow(unused_mut)]
+    {
+        let mut executable =
+            Executable::<UserError, TestInstructionMeter>::from_text_bytes(&prog, None, config)
                 .unwrap();
-        assert_eq!(
-            0,
-            vm.execute_program_interpreted(&mut DefaultInstructionMeter {})
-                .unwrap()
+        test_interpreter_and_jit!(
+            executable,
+            [],
+            (),
+            { |_vm, res: Result| res.unwrap() == 0x0 },
+            ebpf::PROG_MAX_INSNS as u64 - 4
         );
     }
-    // reset program
-    write_insn(&mut prog, ebpf::PROG_MAX_INSNS - 2, "mov64 r0, 0");
 
     {
-        // test program that is too large
+        // Test program that is too large
         prog.extend_from_slice(&assemble("exit").unwrap());
 
         assert!(
             Executable::<UserError, DefaultInstructionMeter>::from_text_bytes(
                 &prog,
                 Some(check),
-                Config::default()
+                config,
             )
             .is_err()
-        );
-    }
-    // reset program
-    prog.truncate(ebpf::PROG_MAX_INSNS * ebpf::INSN_SIZE);
-
-    // verify program still works
-    #[allow(unused_mut)]
-    {
-        let mut executable = Executable::<UserError, TestInstructionMeter>::from_text_bytes(
-            &prog,
-            None,
-            Config::default(),
-        )
-        .unwrap();
-        test_interpreter_and_jit!(
-            executable,
-            [],
-            (),
-            { |_vm, res: Result| res.unwrap() == 0x0 },
-            ebpf::PROG_MAX_INSNS as u64
         );
     }
 }
