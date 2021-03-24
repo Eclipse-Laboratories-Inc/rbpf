@@ -27,6 +27,7 @@ use crate::{
     error::{UserDefinedError, EbpfError},
     memory_region::{AccessType, MemoryMapping},
     user_error::UserError,
+    x86::*,
 };
 
 /// Argument for executing a eBPF JIT-compiled program
@@ -138,36 +139,6 @@ const TARGET_PC_SYSCALL_EXCEPTION: usize = std::usize::MAX - 3;
 const TARGET_PC_EXIT: usize = std::usize::MAX - 2;
 const TARGET_PC_EPILOGUE: usize = std::usize::MAX - 1;
 
-// Registers
-const RAX: u8 = 0;
-const RCX: u8 = 1;
-const RDX: u8 = 2;
-const RBX: u8 = 3;
-const RSP: u8 = 4;
-const RBP: u8 = 5;
-const RSI: u8 = 6;
-const RDI: u8 = 7;
-const R8:  u8 = 8;
-const R9:  u8 = 9;
-const R10: u8 = 10;
-const R11: u8 = 11;
-const R12: u8 = 12;
-const R13: u8 = 13;
-const R14: u8 = 14;
-const R15: u8 = 15;
-
-// System V AMD64 ABI
-// Works on: Linux, macOS, BSD and Solaris but not on Windows
-const ARGUMENT_REGISTERS: [u8; 6] = [
-    RDI, RSI, RDX, RCX, R8, R9
-];
-const CALLER_SAVED_REGISTERS: [u8; 9] = [
-    RAX, RCX, RDX, RSI, RDI, R8, R9, R10, R11
-];
-const CALLEE_SAVED_REGISTERS: [u8; 6] = [
-    RBP, RBX, R12, R13, R14, R15
-];
-
 // Special registers:
 // RDI Instruction meter (BPF pc limit)
 // RBP Stores a constant pointer to original RSP-8
@@ -189,7 +160,7 @@ const REGISTER_MAP: [u8; 11] = [
 ];
 
 #[inline]
-fn emit<T, E: UserDefinedError>(jit: &mut JitCompiler, data: T) -> Result<(), EbpfError<E>> {
+pub fn emit<T, E: UserDefinedError>(jit: &mut JitCompiler, data: T) -> Result<(), EbpfError<E>> {
     let size = mem::size_of::<T>() as usize;
     if jit.offset_in_text_section + size > jit.result.text_section.len() {
         return Err(EbpfError::ExhausedTextSegment(jit.pc));
@@ -203,7 +174,7 @@ fn emit<T, E: UserDefinedError>(jit: &mut JitCompiler, data: T) -> Result<(), Eb
     Ok(())
 }
 
-fn emit_variable_length<E: UserDefinedError>(jit: &mut JitCompiler, size: OperandSize, data: u64) -> Result<(), EbpfError<E>> {
+pub fn emit_variable_length<E: UserDefinedError>(jit: &mut JitCompiler, size: OperandSize, data: u64) -> Result<(), EbpfError<E>> {
     match size {
         OperandSize::S0 => Ok(()),
         OperandSize::S8 => emit::<u8, E>(jit, data as u8),
@@ -214,365 +185,12 @@ fn emit_variable_length<E: UserDefinedError>(jit: &mut JitCompiler, size: Operan
 }
 
 #[derive(PartialEq, Eq, Copy, Clone)]
-enum OperandSize {
+pub enum OperandSize {
     S0  = 0,
     S8  = 8,
     S16 = 16,
     S32 = 32,
     S64 = 64,
-}
-
-struct X86Rex {
-    w: bool,
-    r: bool,
-    x: bool,
-    b: bool,
-}
-
-struct X86ModRm {
-    mode: u8,
-    r: u8,
-    m: u8,
-}
-
-struct X86Sib {
-    scale: u8,
-    index: u8,
-    base: u8,
-}
-
-#[derive(PartialEq, Eq, Copy, Clone)]
-enum X86IndirectAccess {
-    /// [second_operand + offset]
-    Offset(i32),
-    /// [second_operand + offset + index << shift]
-    #[allow(dead_code)]
-    OffsetIndexShift(i32, u8, u8),
-}
-
-#[derive(PartialEq, Eq, Copy, Clone)]
-struct X86Instruction {
-    size: OperandSize,
-    opcode_escape_sequence: u8,
-    opcode: u8,
-    modrm: bool,
-    indirect: Option<X86IndirectAccess>,
-    first_operand: u8,
-    second_operand: u8,
-    immediate_size: OperandSize,
-    immediate: i64,
-}
-
-impl Default for X86Instruction {
-    fn default() -> Self {
-        Self {
-            size: OperandSize::S64,
-            opcode_escape_sequence: 0,
-            opcode: 0,
-            modrm: true,
-            indirect: None,
-            first_operand: 0,
-            second_operand: 0,
-            immediate_size: OperandSize::S0,
-            immediate: 0,
-        }
-    }
-}
-
-impl X86Instruction {
-    fn emit<E: UserDefinedError>(&self, jit: &mut JitCompiler) -> Result<(), EbpfError<E>> {
-        let mut rex = X86Rex {
-            w: self.size == OperandSize::S64,
-            r: self.first_operand & 0b1000 != 0,
-            x: false,
-            b: self.second_operand & 0b1000 != 0,
-        };
-        let mut modrm = X86ModRm {
-            mode: 0,
-            r: self.first_operand & 0b111,
-            m: self.second_operand & 0b111,
-        };
-        let mut sib = X86Sib {
-            scale: 0,
-            index: 0,
-            base: 0,
-        };
-        let mut displacement_size = OperandSize::S0;
-        let mut displacement = 0;
-        if self.modrm {
-            match self.indirect {
-                Some(X86IndirectAccess::Offset(offset)) => {
-                    displacement = offset;
-                    debug_assert_ne!(self.second_operand & 0b111, RSP); // Reserved for SIB addressing
-                    if (displacement >= -128 && displacement <= 127) ||
-                       (displacement == 0 && self.second_operand & 0b111 == RBP) {
-                        displacement_size = OperandSize::S8;
-                        modrm.mode = 1;
-                    } else {
-                        displacement_size = OperandSize::S32;
-                        modrm.mode = 2;
-                    }
-                }
-                Some(X86IndirectAccess::OffsetIndexShift(offset, index, shift)) => {
-                    displacement = offset;
-                    displacement_size = OperandSize::S32;
-                    modrm.mode = 2;
-                    modrm.m = RSP;
-                    rex.x = index & 0b1000 != 0;
-                    sib.scale = shift & 0b11;
-                    sib.index = index & 0b111;
-                    sib.base = self.second_operand & 0b111;
-                }
-                None => {
-                    modrm.mode = 3;
-                }
-            }
-        }
-        if self.size == OperandSize::S16 {
-            emit::<u8, E>(jit, 0x66)?;
-        }
-        let rex = ((rex.w as u8) << 3) | ((rex.r as u8) << 2) | ((rex.x as u8) << 1) | (rex.b as u8);
-        if rex != 0 {
-            emit::<u8, E>(jit, 0x40 | rex)?;
-        }
-        match self.opcode_escape_sequence {
-            1 => emit::<u8, E>(jit, 0x0f)?,
-            2 => emit::<u16, E>(jit, 0x0f38)?,
-            3 => emit::<u16, E>(jit, 0x0f3a)?,
-            _ => {},
-        }
-        emit::<u8, E>(jit, self.opcode)?;
-        if self.modrm {
-            emit::<u8, E>(jit, (modrm.mode << 6) | (modrm.r << 3) | modrm.m)?;
-            let sib = (sib.scale << 6) | (sib.index << 3) | sib.base;
-            if sib != 0 {
-                emit::<u8, E>(jit, sib)?;
-            }
-            emit_variable_length(jit, displacement_size, displacement as u64)?;
-        }
-        emit_variable_length(jit, self.immediate_size, self.immediate as u64)
-    }
-
-    /// Move source to destination
-    fn mov(size: OperandSize, source: u8, destination: u8) -> Self {
-        Self {
-            size,
-            opcode: 0x89,
-            first_operand: source,
-            second_operand: destination,
-            ..Self::default()
-        }
-    }
-
-    /// Swap source and destination
-    fn xchg(size: OperandSize, source: u8, destination: u8) -> Self {
-        Self {
-            size,
-            opcode: 0x87,
-            first_operand: source,
-            second_operand: destination,
-            ..Self::default()
-        }
-    }
-
-    /// Swap byte order of destination
-    fn bswap(size: OperandSize, destination: u8) -> Self {
-        match size {
-            OperandSize::S16 => Self {
-                size,
-                opcode: 0xc1,
-                second_operand: destination,
-                immediate_size: OperandSize::S8,
-                immediate: 8,
-                ..Self::default()
-            },
-            OperandSize::S32 | OperandSize::S64 => Self {
-                size,
-                opcode_escape_sequence: 1,
-                opcode: 0xc8 | (destination & 0b111),
-                modrm: false,
-                second_operand: destination,
-                ..Self::default()
-            },
-            _ => unimplemented!(),
-        }
-    }
-
-    /// Sign extend source i32 to destination i64
-    fn sign_extend_i32_to_i64(source: u8, destination: u8) -> Self {
-        Self {
-            opcode: 0x63,
-            first_operand: source,
-            second_operand: destination,
-            ..Self::default()
-        }
-    }
-
-    /// Compare source and destination
-    fn cmp(size: OperandSize, source: u8, destination: u8, indirect: Option<X86IndirectAccess>) -> Self {
-        Self {
-            size,
-            opcode: 0x39,
-            first_operand: source,
-            second_operand: destination,
-            indirect,
-            ..Self::default()
-        }
-    }
-
-    /// Compare source and destination
-    fn cmp_immediate(size: OperandSize, destination: u8, immediate: i64, indirect: Option<X86IndirectAccess>) -> Self {
-        Self {
-            size,
-            opcode: 0x81,
-            first_operand: RDI,
-            second_operand: destination,
-            immediate_size: OperandSize::S32,
-            immediate,
-            indirect,
-            ..Self::default()
-        }
-    }
-
-    /// Load effective address of source into destination
-    #[allow(dead_code)]
-    fn lea(size: OperandSize, source: u8, destination: u8, indirect: Option<X86IndirectAccess>) -> Self {
-        Self {
-            size,
-            opcode: 0x8d,
-            first_operand: destination,
-            second_operand: source,
-            indirect,
-            ..Self::default()
-        }
-    }
-
-    /// Load destination from [source + offset]
-    fn load(size: OperandSize, source: u8, destination: u8, indirect: X86IndirectAccess) -> Self {
-        Self {
-            size: if size == OperandSize::S64 { OperandSize::S64 } else { OperandSize::S32 },
-            opcode_escape_sequence: if size == OperandSize::S8 || size == OperandSize::S16 { 1 } else { 0 },
-            opcode: match size {
-                OperandSize::S8 => 0xb6,
-                OperandSize::S16 => 0xb7,
-                _ => 0x8b,
-            },
-            first_operand: destination,
-            second_operand: source,
-            indirect: Some(indirect),
-            ..Self::default()
-        }
-    }
-
-    /// Store source in [destination + offset]
-    fn store(size: OperandSize, source: u8, destination: u8, indirect: X86IndirectAccess) -> Self {
-        Self {
-            size,
-            opcode: match size {
-                OperandSize::S8 => 0x88,
-                _ => 0x89,
-            },
-            first_operand: source,
-            second_operand: destination,
-            indirect: Some(indirect),
-            ..Self::default()
-        }
-    }
-
-    /// Load destination from sign-extended immediate
-    fn load_immediate(size: OperandSize, destination: u8, immediate: i64) -> Self {
-        let immediate_size = if immediate >= std::i32::MIN as i64 && immediate <= std::i32::MAX as i64 { OperandSize::S32 } else { OperandSize::S64 };
-        match immediate_size {
-            OperandSize::S32 => Self {
-                size,
-                opcode: 0xc7,
-                second_operand: destination,
-                immediate_size: OperandSize::S32,
-                immediate,
-                ..Self::default()
-            },
-            OperandSize::S64 => Self {
-                size,
-                opcode: 0xb8 | (destination & 0b111),
-                modrm: false,
-                second_operand: destination,
-                immediate_size: OperandSize::S64,
-                immediate,
-                ..Self::default()
-            },
-            _ => unimplemented!(),
-        }
-    }
-
-    /// Store sign-extended immediate in destination
-    fn store_immediate(size: OperandSize, destination: u8, indirect: X86IndirectAccess, immediate: i64) -> Self {
-        Self {
-            size,
-            opcode: match size {
-                OperandSize::S8 => 0xc6,
-                _ => 0xc7,
-            },
-            second_operand: destination,
-            indirect: Some(indirect),
-            immediate_size: if size == OperandSize::S64 { OperandSize::S32 } else { size },
-            immediate,
-            ..Self::default()
-        }
-    }
-
-    /// Push source onto the stack
-    fn push(source: u8) -> Self {
-        Self {
-            size: OperandSize::S32,
-            opcode: 0x50 | (source & 0b111),
-            modrm: false,
-            second_operand: source,
-            ..Self::default()
-        }
-    }
-
-    /// Pop from the stack into destination
-    fn pop(destination: u8) -> Self {
-        Self {
-            size: OperandSize::S32,
-            opcode: 0x58 | (destination & 0b111),
-            modrm: false,
-            second_operand: destination,
-            ..Self::default()
-        }
-    }
-
-    /// Pop into RIP
-    fn return_near() -> Self {
-        Self {
-            size: OperandSize::S32,
-            opcode: 0xc3,
-            modrm: false,
-            ..Self::default()
-        }
-    }
-
-    /// Trap / software interrupt
-    #[allow(dead_code)]
-    fn interrupt(immediate: u8) -> Self {
-        if immediate == 3 {
-            Self {
-                size: OperandSize::S32,
-                opcode: 0xcc,
-                modrm: false,
-                ..Self::default()
-            }
-        } else {
-            Self {
-                size: OperandSize::S32,
-                opcode: 0xcd,
-                modrm: false,
-                immediate_size: OperandSize::S8,
-                immediate: immediate as i64,
-                ..Self::default()
-            }
-        }
-    }
 }
 
 #[inline]
@@ -1063,7 +681,7 @@ impl Jump {
     }
 }
 
-struct JitCompiler {
+pub struct JitCompiler {
     result: JitProgramSections,
     pc_section_jumps: Vec<Jump>,
     text_section_jumps: Vec<Jump>,
@@ -1144,13 +762,15 @@ impl JitCompiler {
 
         self.generate_prologue::<E, I>()?;
 
-        // Jump to custom entry point (if any)
+        // Jump to entry point
         let entry = executable.get_entrypoint_instruction_offset().unwrap_or(0);
-        if entry != 0 {
-            emit_profile_instruction_count(self, Some(entry + 1))?;
-            X86Instruction::load_immediate(OperandSize::S64, R11, entry as i64).emit(self)?;
-            emit_jmp(self, entry)?;
-        }
+        emit_profile_instruction_count(self, Some(entry + 1))?;
+        X86Instruction::load_immediate(OperandSize::S64, R11, entry as i64).emit(self)?;
+        emit_jmp(self, entry)?;
+
+        // Have these in front so that the linear search of TARGET_PC_TRANSLATE_PC does not terminate early
+        self.generate_helper_routines::<E>()?;
+        self.generate_exception_handlers::<E>()?;
 
         while self.pc * ebpf::INSN_SIZE < program.len() {
             let insn = ebpf::get_insn(program, self.pc);
@@ -1491,8 +1111,6 @@ impl JitCompiler {
         emit_set_exception_kind::<E>(self, EbpfError::ExecutionOverrun(0))?;
         emit_jmp(self, TARGET_PC_EXCEPTION_AT)?;
 
-        self.generate_helper_routines::<E>()?;
-        self.generate_exception_handlers::<E>()?;
         self.generate_epilogue::<E>()?;
         self.resolve_jumps();
         self.result.seal();
@@ -1529,8 +1147,8 @@ impl JitCompiler {
         X86Instruction::load_immediate(OperandSize::S64, REGISTER_MAP[0], self.result.pc_section.as_ptr() as i64 - 8).emit(self)?; // Loop index and pointer to look up
         set_anchor(self, TARGET_PC_TRANSLATE_PC_LOOP); // Loop label
         emit_alu(self, OperandSize::S64, 0x81, 0, REGISTER_MAP[0], 8, None)?; // Increase index
-        X86Instruction::cmp(OperandSize::S64, R11, REGISTER_MAP[0], Some(X86IndirectAccess::Offset(0))).emit(self)?; // Look up and compare against value at index
-        emit_jcc(self, 0x82, TARGET_PC_TRANSLATE_PC_LOOP)?; // Continue while *REGISTER_MAP[0] < R11
+        X86Instruction::cmp(OperandSize::S64, R11, REGISTER_MAP[0], Some(X86IndirectAccess::Offset(8))).emit(self)?; // Look up and compare against value at next index
+        emit_jcc(self, 0x86, TARGET_PC_TRANSLATE_PC_LOOP)?; // Continue while *REGISTER_MAP[0] <= R11
         X86Instruction::mov(OperandSize::S64, REGISTER_MAP[0], R11).emit(self)?; // R11 = REGISTER_MAP[0];
         X86Instruction::load_immediate(OperandSize::S64, REGISTER_MAP[0], self.result.pc_section.as_ptr() as i64).emit(self)?; // REGISTER_MAP[0] = self.result.pc_section;
         emit_alu(self, OperandSize::S64, 0x29, REGISTER_MAP[0], R11, 0, None)?; // R11 -= REGISTER_MAP[0];
@@ -1565,7 +1183,10 @@ impl JitCompiler {
 
         // Handler for EbpfError::UnsupportedInstruction
         set_anchor(self, TARGET_PC_CALLX_UNSUPPORTED_INSTRUCTION);
+        emit_alu(self, OperandSize::S64, 0x31, R11, R11, 0, None)?; // R11 = 0;
+        X86Instruction::load(OperandSize::S64, RSP, R11, X86IndirectAccess::OffsetIndexShift(0, R11, 0)).emit(self)?;    
         emit_call(self, TARGET_PC_TRANSLATE_PC)?;
+        emit_alu(self, OperandSize::S64, 0x81, 0, R11, 2, None)?; // Increment exception pc
         // emit_jmp(self, TARGET_PC_CALL_UNSUPPORTED_INSTRUCTION)?; // Fall-through
 
         // Handler for EbpfError::UnsupportedInstruction
