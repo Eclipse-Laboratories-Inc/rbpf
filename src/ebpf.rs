@@ -422,8 +422,10 @@ pub const BPF_ALU_OP_MASK: u8 = 0xf0;
 /// See <https://www.kernel.org/doc/Documentation/networking/filter.txt> for the Linux kernel
 /// documentation about eBPF, or <https://github.com/iovisor/bpf-docs/blob/master/eBPF.md> for a
 /// more concise version.
-#[derive(PartialEq, Clone)]
+#[derive(PartialEq, Clone, Default)]
 pub struct Insn {
+    /// Instruction pointer.
+    pub ptr: usize,
     /// Operation code.
     pub opc: u8,
     /// Destination register operand.
@@ -433,16 +435,15 @@ pub struct Insn {
     /// Offset operand.
     pub off: i16,
     /// Immediate value operand.
-    pub imm: i32,
+    pub imm: i64,
 }
 
 impl fmt::Debug for Insn {
-    // Insn { opc: 191, dst: 6, src: 1, off: 0, imm: 0 }
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(
             f,
-            "Insn {{ opc: 0x{:02x?}, dst: {}, src: {}, off: 0x{:04x?}, imm: 0x{:08x?} }}",
-            self.opc, self.dst, self.src, self.off, self.imm
+            "Insn {{ ptr: 0x{:08x?}, opc: 0x{:02x?}, dst: {}, src: {}, off: 0x{:04x?}, imm: 0x{:08x?} }}",
+            self.ptr, self.opc, self.dst, self.src, self.off, self.imm
         )
     }
 }
@@ -459,6 +460,7 @@ impl Insn {
     ///     0xb7, 0x12, 0x56, 0x34, 0xde, 0xbc, 0x9a, 0x78,
     ///     ];
     /// let insn = ebpf::Insn {
+    ///     ptr: 0x00,
     ///     opc: 0xb7,
     ///     dst: 2,
     ///     src: 1,
@@ -491,6 +493,7 @@ impl Insn {
     ///     0xb7, 0x12, 0x56, 0x34, 0xde, 0xbc, 0x9a, 0x78,
     ///     ];
     /// let insn = ebpf::Insn {
+    ///     ptr: 0x00,
     ///     opc: 0xb7,
     ///     dst: 2,
     ///     src: 1,
@@ -500,16 +503,7 @@ impl Insn {
     /// assert_eq!(insn.to_vec(), prog);
     /// ```
     pub fn to_vec(&self) -> Vec<u8> {
-        vec![
-            self.opc,
-            self.src.wrapping_shl(4) | self.dst,
-            (self.off & 0xff) as u8,
-            self.off.wrapping_shr(8) as u8,
-            (self.imm & 0xff) as u8,
-            (self.imm & 0xff_00).wrapping_shr(8) as u8,
-            (self.imm as u32 & 0xff_00_00).wrapping_shr(16) as u8,
-            (self.imm as u32 & 0xff_00_00_00).wrapping_shr(24) as u8,
-        ]
+        self.to_array().to_vec()
     }
 }
 
@@ -545,90 +539,34 @@ impl Insn {
 ///     ];
 /// let insn = ebpf::get_insn(prog, 1);
 /// ```
-pub fn get_insn(prog: &[u8], idx: usize) -> Insn {
+pub fn get_insn(prog: &[u8], insn_ptr: usize) -> Insn {
     // This guard should not be needed in most cases, since the verifier already checks the program
     // size, and indexes should be fine in the interpreter/JIT. But this function is publicly
-    // available and user can call it with any `idx`, so we have to check anyway.
+    // available and user can call it with any `insn_ptr`, so we have to check anyway.
     debug_assert!(
-        (idx + 1) * INSN_SIZE <= prog.len(),
+        (insn_ptr + 1) * INSN_SIZE <= prog.len(),
         "cannot reach instruction at index {:?} in program containing {:?} bytes",
-        idx,
+        insn_ptr,
         prog.len()
     );
-    get_insn_unchecked(prog, idx)
+    get_insn_unchecked(prog, insn_ptr)
 }
 /// Same as `get_insn` except not checked
-pub fn get_insn_unchecked(prog: &[u8], idx: usize) -> Insn {
+pub fn get_insn_unchecked(prog: &[u8], insn_ptr: usize) -> Insn {
     Insn {
-        opc: prog[INSN_SIZE * idx],
-        dst: prog[INSN_SIZE * idx + 1] & 0x0f,
-        src: (prog[INSN_SIZE * idx + 1] & 0xf0) >> 4,
-        off: LittleEndian::read_i16(&prog[(INSN_SIZE * idx + 2)..]),
-        imm: LittleEndian::read_i32(&prog[(INSN_SIZE * idx + 4)..]),
+        ptr: INSN_SIZE * insn_ptr,
+        opc: prog[INSN_SIZE * insn_ptr],
+        dst: prog[INSN_SIZE * insn_ptr + 1] & 0x0f,
+        src: (prog[INSN_SIZE * insn_ptr + 1] & 0xf0) >> 4,
+        off: LittleEndian::read_i16(&prog[(INSN_SIZE * insn_ptr + 2)..]),
+        imm: LittleEndian::read_i32(&prog[(INSN_SIZE * insn_ptr + 4)..]) as i64,
     }
 }
 
-/// Return a vector of `struct Insn` built from a program.
-///
-/// This is provided as a convenience for users wishing to manipulate a vector of instructions, for
-/// example for dumping the program instruction after instruction with a custom format.
-///
-/// Note that the two parts of `LD_DW_IMM` instructions (spanning on 64 bits) are considered as two
-/// distinct instructions.
-///
-/// # Examples
-///
-/// ```
-/// use solana_rbpf::ebpf;
-///
-/// let prog = &[
-///     0x18, 0x00, 0x00, 0x00, 0x88, 0x77, 0x66, 0x55,
-///     0x00, 0x00, 0x00, 0x00, 0x44, 0x33, 0x22, 0x11,
-///     0x95, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
-/// ];
-///
-/// let v = ebpf::to_insn_vec(prog);
-/// assert_eq!(v, vec![
-///     ebpf::Insn {
-///         opc: 0x18,
-///         dst: 0,
-///         src: 0,
-///         off: 0,
-///         imm: 0x55667788
-///     },
-///     ebpf::Insn {
-///         opc: 0,
-///         dst: 0,
-///         src: 0,
-///         off: 0,
-///         imm: 0x11223344
-///     },
-///     ebpf::Insn {
-///         opc: 0x95,
-///         dst: 0,
-///         src: 0,
-///         off: 0,
-///         imm: 0
-///     },
-/// ]);
-/// ```
-pub fn to_insn_vec(prog: &[u8]) -> Vec<Insn> {
-    debug_assert!(
-        prog.len() % INSN_SIZE == 0,
-        "eBPF program length {:?} must be a multiple of {:?} octets",
-        prog.len(),
-        INSN_SIZE
-    );
-
-    let mut res = vec![];
-    let mut insn_ptr: usize = 0;
-
-    while insn_ptr * INSN_SIZE < prog.len() {
-        let insn = get_insn(prog, insn_ptr);
-        res.push(insn);
-        insn_ptr += 1;
-    }
-    res
+/// Merge the two halves of a LD_DW_IMM instruction
+pub fn augment_lddw_unchecked(prog: &[u8], insn: &mut Insn) {
+    let more_significant_half = LittleEndian::read_i32(&prog[(insn.ptr + INSN_SIZE + 4)..]);
+    insn.imm = ((insn.imm as u64 & 0xffffffff) | ((more_significant_half as u64) << 32)) as i64;
 }
 
 /// Hash a symbol name

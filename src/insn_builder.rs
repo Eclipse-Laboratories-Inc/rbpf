@@ -29,7 +29,7 @@ pub trait Instruction: Sized {
     }
 
     /// returns immediate value
-    fn get_imm(&self) -> i32 {
+    fn get_imm(&self) -> i64 {
         self.get_insn().imm
     }
 
@@ -52,7 +52,7 @@ pub trait Instruction: Sized {
     }
 
     /// sets immediate value
-    fn set_imm(mut self, imm: i32) -> Self {
+    fn set_imm(mut self, imm: i64) -> Self {
         self.get_insn_mut().imm = imm;
         self
     }
@@ -181,13 +181,7 @@ impl BpfCode {
             src_bit: source,
             op_bits,
             arch_bits,
-            insn: Insn {
-                opc: 0x00,
-                dst: 0x00,
-                src: 0x00,
-                off: 0x00_00,
-                imm: 0x00_00_00_00,
-            },
+            insn: Insn::default(),
         }
     }
 
@@ -196,13 +190,7 @@ impl BpfCode {
         SwapBytes {
             bpf_code: self,
             endian,
-            insn: Insn {
-                opc: 0x00,
-                dst: 0x00,
-                src: 0x00,
-                off: 0x00_00,
-                imm: 0x00_00_00_00,
-            },
+            insn: Insn::default(),
         }
     }
 
@@ -233,13 +221,7 @@ impl BpfCode {
             addressing,
             mem_size,
             source,
-            insn: Insn {
-                opc: 0x00,
-                dst: 0x00,
-                src: 0x00,
-                off: 0x00_00,
-                imm: 0x00_00_00_00,
-            },
+            insn: Insn::default(),
         }
     }
 
@@ -259,13 +241,7 @@ impl BpfCode {
             bpf_code: self,
             mem_size,
             source,
-            insn: Insn {
-                opc: 0x00,
-                dst: 0x00,
-                src: 0x00,
-                off: 0x00_00,
-                imm: 0x00_00_00_00,
-            },
+            insn: Insn::default(),
         }
     }
 
@@ -280,13 +256,7 @@ impl BpfCode {
             bpf_code: self,
             cond,
             src_bit,
-            insn: Insn {
-                opc: 0x00,
-                dst: 0x00,
-                src: 0x00,
-                off: 0x00_00,
-                imm: 0x00_00_00_00,
-            },
+            insn: Insn::default(),
         }
     }
 
@@ -294,13 +264,7 @@ impl BpfCode {
     pub fn call(&mut self) -> FunctionCall {
         FunctionCall {
             bpf_code: self,
-            insn: Insn {
-                opc: 0x00,
-                dst: 0x00,
-                src: 0x00,
-                off: 0x00_00,
-                imm: 0x00_00_00_00,
-            },
+            insn: Insn::default(),
         }
     }
 
@@ -308,13 +272,7 @@ impl BpfCode {
     pub fn exit(&mut self) -> Exit {
         Exit {
             bpf_code: self,
-            insn: Insn {
-                opc: 0x00,
-                dst: 0x00,
-                src: 0x00,
-                off: 0x00_00,
-                imm: 0x00_00_00_00,
-            },
+            insn: Insn::default(),
         }
     }
 }

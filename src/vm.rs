@@ -616,7 +616,7 @@ impl<'a, E: UserDefinedError, I: InstructionMeter> EbpfVm<'a, E, I> {
         while next_pc * ebpf::INSN_SIZE + ebpf::INSN_SIZE <= self.program.len() {
             let pc = next_pc;
             next_pc += 1;
-            let insn = ebpf::get_insn_unchecked(self.program, pc);
+            let mut insn = ebpf::get_insn_unchecked(self.program, pc);
             let dst = insn.dst as usize;
             let src = insn.src as usize;
             self.last_insn_count += 1;
@@ -675,9 +675,9 @@ impl<'a, E: UserDefinedError, I: InstructionMeter> EbpfVm<'a, E, I> {
                 },
 
                 ebpf::LD_DW_IMM  => {
-                    let next_insn = ebpf::get_insn(self.program, next_pc);
+                    ebpf::augment_lddw_unchecked(self.program, &mut insn);
                     next_pc += 1;
-                    reg[dst] = (insn.imm as u32) as u64 + ((next_insn.imm as u64) << 32);
+                    reg[dst] = insn.imm as u64;
                 },
 
                 // BPF_LDX class
@@ -747,11 +747,11 @@ impl<'a, E: UserDefinedError, I: InstructionMeter> EbpfVm<'a, E, I> {
                 },
 
                 // BPF_ALU class
-                ebpf::ADD32_IMM  => reg[dst] = (reg[dst] as i32).wrapping_add(insn.imm)          as u64,
+                ebpf::ADD32_IMM  => reg[dst] = (reg[dst] as i32).wrapping_add(insn.imm as i32)   as u64,
                 ebpf::ADD32_REG  => reg[dst] = (reg[dst] as i32).wrapping_add(reg[src] as i32)   as u64,
-                ebpf::SUB32_IMM  => reg[dst] = (reg[dst] as i32).wrapping_sub(insn.imm)          as u64,
+                ebpf::SUB32_IMM  => reg[dst] = (reg[dst] as i32).wrapping_sub(insn.imm as i32)   as u64,
                 ebpf::SUB32_REG  => reg[dst] = (reg[dst] as i32).wrapping_sub(reg[src] as i32)   as u64,
-                ebpf::MUL32_IMM  => reg[dst] = (reg[dst] as i32).wrapping_mul(insn.imm)          as u64,
+                ebpf::MUL32_IMM  => reg[dst] = (reg[dst] as i32).wrapping_mul(insn.imm as i32)   as u64,
                 ebpf::MUL32_REG  => reg[dst] = (reg[dst] as i32).wrapping_mul(reg[src] as i32)   as u64,
                 ebpf::DIV32_IMM  => reg[dst] = (reg[dst] as u32 / insn.imm as u32)               as u64,
                 ebpf::DIV32_REG  => {
