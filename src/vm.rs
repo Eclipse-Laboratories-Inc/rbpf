@@ -10,9 +10,11 @@
 
 //! Virtual machine and JIT compiler for eBPF programs.
 
+use crate::disassembler::disassemble_instruction;
+use crate::static_analysis::Analysis;
 use crate::{
     call_frames::CallFrames,
-    disassembler, ebpf,
+    ebpf,
     elf::EBpfElf,
     error::{EbpfError, UserDefinedError},
     jit::{JitProgram, JitProgramArgument},
@@ -20,7 +22,11 @@ use crate::{
     user_error::UserError,
 };
 use log::debug;
-use std::{collections::HashMap, fmt::Debug, u32};
+use std::{
+    collections::{BTreeMap, HashMap},
+    fmt::Debug,
+    u32,
+};
 
 /// eBPF verification function that returns an error if the program does not meet its requirements.
 ///
@@ -213,7 +219,7 @@ pub trait Executable<E: UserDefinedError, I: InstructionMeter>: Send + Sync {
     /// Report information on a symbol that failed to be resolved
     fn report_unresolved_symbol(&self, insn_offset: usize) -> Result<u64, EbpfError<E>>;
     /// Get syscalls and BPF functions (if debug symbols are not stripped)
-    fn get_symbols(&self) -> (HashMap<u32, String>, HashMap<usize, (String, usize)>);
+    fn get_symbols(&self) -> (BTreeMap<u32, String>, BTreeMap<usize, String>);
 }
 
 /// Static constructors for Executable
@@ -262,6 +268,43 @@ impl InstructionMeter for DefaultInstructionMeter {
     }
 }
 
+/// Statistic of taken branches (from a recorded trace)
+pub struct DynamicAnalysis {
+    /// Maximal edge counter value
+    pub edge_counter_max: usize,
+    /// src_node, dst_node, edge_counter
+    pub edges: BTreeMap<usize, BTreeMap<usize, usize>>,
+}
+
+impl DynamicAnalysis {
+    /// Accumulates a trace
+    pub fn new<E: UserDefinedError, I: InstructionMeter>(
+        tracer: &Tracer,
+        analysis: &Analysis<E, I>,
+    ) -> Self {
+        let mut result = Self {
+            edge_counter_max: 0,
+            edges: BTreeMap::new(),
+        };
+        let mut last_basic_block = std::usize::MAX;
+        for traced_instruction in tracer.log.iter() {
+            let pc = traced_instruction[11] as usize;
+            if analysis.cfg_nodes.contains_key(&pc) {
+                let counter = result
+                    .edges
+                    .entry(last_basic_block)
+                    .or_insert_with(BTreeMap::new)
+                    .entry(pc)
+                    .or_insert(0);
+                *counter += 1;
+                result.edge_counter_max = result.edge_counter_max.max(*counter);
+                last_basic_block = pc;
+            }
+        }
+        result
+    }
+}
+
 /// Used for instruction tracing
 #[derive(Default, Clone)]
 pub struct Tracer {
@@ -276,33 +319,41 @@ impl Tracer {
     }
 
     /// Use this method to print the log of this tracer
-    pub fn write<W: std::fmt::Write>(
+    pub fn write<W: std::io::Write, E: UserDefinedError, I: InstructionMeter>(
         &self,
-        out: &mut W,
-        program: &[u8],
-    ) -> Result<(), std::fmt::Error> {
-        let disassembled = disassembler::to_insn_vec(program);
-        let mut pc_to_instruction_index =
-            vec![0usize; disassembled.last().map(|ins| ins.ptr + 2).unwrap_or(0)];
-        for index in 0..disassembled.len() {
-            pc_to_instruction_index[disassembled[index].ptr] = index;
-            pc_to_instruction_index[disassembled[index].ptr + 1] = index;
+        output: &mut W,
+        analysis: &Analysis<E, I>,
+    ) -> Result<(), std::io::Error> {
+        let mut pc_to_insn_index = vec![
+            0usize;
+            analysis
+                .instructions
+                .last()
+                .map(|insn| insn.ptr + 2)
+                .unwrap_or(0)
+        ];
+        for (index, insn) in analysis.instructions.iter().enumerate() {
+            pc_to_insn_index[insn.ptr] = index;
+            pc_to_insn_index[insn.ptr + 1] = index;
         }
         for index in 0..self.log.len() {
             let entry = &self.log[index];
+            let pc = entry[11] as usize;
+            let insn = &analysis.instructions[pc_to_insn_index[pc]];
             writeln!(
-                out,
+                output,
                 "{:5?} {:016X?} {:5?}: {}",
                 index,
                 &entry[0..11],
-                entry[11] as usize + ebpf::ELF_INSN_DUMP_OFFSET,
-                disassembled[pc_to_instruction_index[entry[11] as usize]].desc,
+                pc + ebpf::ELF_INSN_DUMP_OFFSET,
+                disassemble_instruction(&insn, &analysis),
             )?;
         }
         Ok(())
     }
 
     /// Compares an interpreter trace and a JIT trace.
+    ///
     /// The log of the JIT can be longer because it only validates the instruction meter at branches.
     pub fn compare(interpreter: &Self, jit: &Self) -> bool {
         let interpreter = interpreter.log.as_slice();
