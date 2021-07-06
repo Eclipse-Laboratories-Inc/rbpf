@@ -11,12 +11,20 @@ extern crate test;
 extern crate test_utils;
 
 use solana_rbpf::{
+    syscalls::BpfSyscallU64,
     user_error::UserError,
     vm::{Config, DefaultInstructionMeter, Executable, SyscallObject, SyscallRegistry},
 };
 use std::{fs::File, io::Read};
 use test::Bencher;
-use test_utils::BpfSyscallU64;
+
+fn syscall_registry() -> SyscallRegistry {
+    let mut syscall_registry = SyscallRegistry::default();
+    syscall_registry
+        .register_syscall_by_name::<UserError, _>(b"log_64", BpfSyscallU64::call)
+        .unwrap();
+    syscall_registry
+}
 
 #[bench]
 fn bench_load_elf(bencher: &mut Bencher) {
@@ -28,6 +36,7 @@ fn bench_load_elf(bencher: &mut Bencher) {
             &elf,
             None,
             Config::default(),
+            syscall_registry(),
         )
         .unwrap()
     });
@@ -43,6 +52,7 @@ fn bench_load_elf_without_syscall(bencher: &mut Bencher) {
             &elf,
             None,
             Config::default(),
+            syscall_registry(),
         )
         .unwrap();
         executable
@@ -55,17 +65,13 @@ fn bench_load_elf_with_syscall(bencher: &mut Bencher) {
     let mut elf = Vec::new();
     file.read_to_end(&mut elf).unwrap();
     bencher.iter(|| {
-        let mut executable = <dyn Executable<UserError, DefaultInstructionMeter>>::from_elf(
+        let executable = <dyn Executable<UserError, DefaultInstructionMeter>>::from_elf(
             &elf,
             None,
             Config::default(),
+            syscall_registry(),
         )
         .unwrap();
-        let mut syscall_registry = SyscallRegistry::default();
-        syscall_registry
-            .register_syscall_by_name::<UserError, _>(b"log_64", BpfSyscallU64::call)
-            .unwrap();
-        executable.set_syscall_registry(syscall_registry);
         executable
     });
 }

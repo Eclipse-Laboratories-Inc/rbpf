@@ -23,12 +23,12 @@ extern crate test_utils;
 
 use solana_rbpf::{
     fuzz::fuzz,
+    syscalls::{BpfSyscallString, BpfSyscallU64},
     user_error::UserError,
     verifier::check,
     vm::{Config, DefaultInstructionMeter, EbpfVm, Executable, SyscallObject, SyscallRegistry},
 };
 use std::{fs::File, io::Read};
-use test_utils::{BpfSyscallString, BpfSyscallU64};
 
 // The following two examples have been compiled from C with the following command:
 //
@@ -111,21 +111,19 @@ fn test_fuzz_execute() {
         0..elf.len(),
         0..255,
         |bytes: &mut [u8]| {
-            if let Ok(mut executable) =
-                <dyn Executable<UserError, DefaultInstructionMeter>>::from_elf(
-                    bytes,
-                    Some(check),
-                    Config::default(),
-                )
-            {
-                let mut syscall_registry = SyscallRegistry::default();
-                syscall_registry
-                    .register_syscall_by_name::<UserError, _>(b"log", BpfSyscallString::call)
-                    .unwrap();
-                syscall_registry
-                    .register_syscall_by_name::<UserError, _>(b"log_64", BpfSyscallU64::call)
-                    .unwrap();
-                executable.set_syscall_registry(syscall_registry);
+            let mut syscall_registry = SyscallRegistry::default();
+            syscall_registry
+                .register_syscall_by_name::<UserError, _>(b"log", BpfSyscallString::call)
+                .unwrap();
+            syscall_registry
+                .register_syscall_by_name::<UserError, _>(b"log_64", BpfSyscallU64::call)
+                .unwrap();
+            if let Ok(executable) = <dyn Executable<UserError, DefaultInstructionMeter>>::from_elf(
+                bytes,
+                Some(check),
+                Config::default(),
+                syscall_registry,
+            ) {
                 let mut vm = EbpfVm::<UserError, DefaultInstructionMeter>::new(
                     executable.as_ref(),
                     &mut [],

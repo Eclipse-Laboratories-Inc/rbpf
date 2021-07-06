@@ -207,8 +207,10 @@ pub struct EBpfElf<E: UserDefinedError, I: InstructionMeter> {
     text_section_info: SectionInfo,
     /// Read-only section info
     ro_section_infos: Vec<SectionInfo>,
-    /// Call resolution map (pc, hash, name)
+    /// Call resolution map (hash, pc, name)
     bpf_functions: BTreeMap<u32, (usize, String)>,
+    /// Syscall symbol map (hash, name)
+    syscall_symbols: BTreeMap<u32, String>,
     /// Syscall resolution map
     syscall_registry: SyscallRegistry,
     /// Compiled program and argument
@@ -266,11 +268,6 @@ impl<E: UserDefinedError, I: InstructionMeter> Executable<E, I> for EBpfElf<E, I
         &self.syscall_registry
     }
 
-    /// Set (overwrite) the syscall registry
-    fn set_syscall_registry(&mut self, syscall_registry: SyscallRegistry) {
-        self.syscall_registry = syscall_registry;
-    }
-
     /// Get the JIT compiled program
     fn get_compiled_program(&self) -> Option<&JitProgram<E, I>> {
         self.compiled_program.as_ref()
@@ -301,9 +298,8 @@ impl<E: UserDefinedError, I: InstructionMeter> Executable<E, I> for EBpfElf<E, I
                             .ok_or(ElfError::UnknownSymbol(relocation.r_sym))?;
                         name = elf
                             .dynstrtab
-                            .get(sym.st_name)
-                            .ok_or(ElfError::UnknownSymbol(sym.st_name))?
-                            .map_err(|_| ElfError::UnknownSymbol(sym.st_name))?;
+                            .get_at(sym.st_name)
+                            .ok_or(ElfError::UnknownSymbol(sym.st_name))?;
                     }
                 }
             }
@@ -317,23 +313,17 @@ impl<E: UserDefinedError, I: InstructionMeter> Executable<E, I> for EBpfElf<E, I
     }
 
     /// Get syscalls and BPF functions (if debug symbols are not stripped)
-    fn get_symbols(&self) -> (BTreeMap<u32, String>, BTreeMap<usize, (u32, String)>) {
-        let mut syscalls = BTreeMap::new();
+    fn get_function_symbols(&self) -> BTreeMap<usize, (u32, String)> {
         let mut bpf_functions = BTreeMap::new();
-        if let Ok(elf) = Elf::parse(self.elf_bytes.as_slice()) {
-            for symbol in &elf.dynsyms {
-                if symbol.st_info != 0x10 {
-                    continue;
-                }
-                let name = elf.dynstrtab.get(symbol.st_name).unwrap().unwrap();
-                let hash = ebpf::hash_symbol_name(name.as_bytes());
-                syscalls.insert(hash, name.to_string());
-            }
-        }
         for (hash, (pc, name)) in self.bpf_functions.iter() {
             bpf_functions.insert(*pc, (*hash, name.clone()));
         }
-        (syscalls, bpf_functions)
+        bpf_functions
+    }
+
+    /// Get syscalls symbols
+    fn get_syscall_symbols(&self) -> &BTreeMap<u32, String> {
+        &self.syscall_symbols
     }
 }
 
@@ -342,6 +332,7 @@ impl<'a, E: UserDefinedError, I: InstructionMeter> EBpfElf<E, I> {
     pub fn new_from_text_bytes(
         config: Config,
         text_bytes: &[u8],
+        syscall_registry: SyscallRegistry,
         bpf_functions: BTreeMap<u32, (usize, String)>,
     ) -> Self {
         let elf_bytes = AlignedMemory::new_with_data(text_bytes, ebpf::HOST_ALIGN);
@@ -358,13 +349,18 @@ impl<'a, E: UserDefinedError, I: InstructionMeter> EBpfElf<E, I> {
             },
             ro_section_infos: vec![],
             bpf_functions,
-            syscall_registry: SyscallRegistry::default(),
+            syscall_symbols: BTreeMap::default(),
+            syscall_registry,
             compiled_program: None,
         }
     }
 
     /// Fully loads an ELF, including validation and relocation
-    pub fn load(config: Config, bytes: &[u8]) -> Result<Self, ElfError> {
+    pub fn load(
+        config: Config,
+        bytes: &[u8],
+        mut syscall_registry: SyscallRegistry,
+    ) -> Result<Self, ElfError> {
         let elf = Elf::parse(bytes)?;
         let mut elf_bytes = AlignedMemory::new_with_data(bytes, ebpf::HOST_ALIGN);
 
@@ -375,12 +371,11 @@ impl<'a, E: UserDefinedError, I: InstructionMeter> EBpfElf<E, I> {
         let text_section_info = SectionInfo {
             name: elf
                 .shdr_strtab
-                .get(text_section.sh_name)
-                .unwrap()
+                .get_at(text_section.sh_name)
                 .unwrap()
                 .to_string(),
             vaddr: text_section.sh_addr.saturating_add(ebpf::MM_PROGRAM_START),
-            offset_range: text_section.file_range(),
+            offset_range: text_section.file_range().unwrap_or_default(),
         };
         if text_section_info.vaddr > ebpf::MM_STACK_START {
             return Err(ElfError::OutOfBounds);
@@ -388,7 +383,15 @@ impl<'a, E: UserDefinedError, I: InstructionMeter> EBpfElf<E, I> {
 
         // relocate symbols
         let mut bpf_functions = BTreeMap::default();
-        Self::relocate(&mut bpf_functions, &elf, elf_bytes.as_slice_mut())?;
+        let mut syscall_symbols = BTreeMap::default();
+        Self::relocate(
+            &config,
+            &mut bpf_functions,
+            &mut syscall_symbols,
+            &mut syscall_registry,
+            &elf,
+            elf_bytes.as_slice_mut(),
+        )?;
 
         // calculate entrypoint offset into the text section
         let offset = elf.header.e_entry - text_section.sh_addr;
@@ -404,14 +407,14 @@ impl<'a, E: UserDefinedError, I: InstructionMeter> EBpfElf<E, I> {
             .section_headers
             .iter()
             .filter_map(|section_header| {
-                if let Some(Ok(name)) = elf.shdr_strtab.get(section_header.sh_name) {
+                if let Some(name) = elf.shdr_strtab.get_at(section_header.sh_name) {
                     if name == ".rodata" || name == ".data.rel.ro" || name == ".eh_frame" {
                         return Some(SectionInfo {
                             name: name.to_string(),
                             vaddr: section_header
                                 .sh_addr
                                 .saturating_add(ebpf::MM_PROGRAM_START),
-                            offset_range: section_header.file_range(),
+                            offset_range: section_header.file_range().unwrap_or_default(),
                         });
                     }
                 }
@@ -430,7 +433,8 @@ impl<'a, E: UserDefinedError, I: InstructionMeter> EBpfElf<E, I> {
             text_section_info,
             ro_section_infos,
             bpf_functions,
-            syscall_registry: SyscallRegistry::default(),
+            syscall_symbols,
+            syscall_registry,
             compiled_program: None,
         })
     }
@@ -482,7 +486,7 @@ impl<'a, E: UserDefinedError, I: InstructionMeter> EBpfElf<E, I> {
         }
 
         let num_text_sections = elf.section_headers.iter().fold(0, |count, section_header| {
-            if let Some(Ok(this_name)) = elf.shdr_strtab.get(section_header.sh_name) {
+            if let Some(this_name) = elf.shdr_strtab.get_at(section_header.sh_name) {
                 if this_name == ".text" {
                     return count + 1;
                 }
@@ -494,7 +498,7 @@ impl<'a, E: UserDefinedError, I: InstructionMeter> EBpfElf<E, I> {
         }
 
         for section_header in elf.section_headers.iter() {
-            if let Some(Ok(this_name)) = elf.shdr_strtab.get(section_header.sh_name) {
+            if let Some(this_name) = elf.shdr_strtab.get_at(section_header.sh_name) {
                 if this_name.starts_with(".bss") {
                     return Err(ElfError::BssNotSupported);
                 }
@@ -525,7 +529,7 @@ impl<'a, E: UserDefinedError, I: InstructionMeter> EBpfElf<E, I> {
     /// Get a section by name
     fn get_section(elf: &Elf, name: &str) -> Result<SectionHeader, ElfError> {
         match elf.section_headers.iter().find(|section_header| {
-            if let Some(Ok(this_name)) = elf.shdr_strtab.get(section_header.sh_name) {
+            if let Some(this_name) = elf.shdr_strtab.get_at(section_header.sh_name) {
                 return this_name == name;
             }
             false
@@ -537,7 +541,10 @@ impl<'a, E: UserDefinedError, I: InstructionMeter> EBpfElf<E, I> {
 
     /// Relocates the ELF in-place
     fn relocate(
+        config: &Config,
         bpf_functions: &mut BTreeMap<u32, (usize, String)>,
+        syscall_symbols: &mut BTreeMap<u32, String>,
+        syscall_registry: &mut SyscallRegistry,
         elf: &Elf,
         elf_bytes: &mut [u8],
     ) -> Result<(), ElfError> {
@@ -547,9 +554,12 @@ impl<'a, E: UserDefinedError, I: InstructionMeter> EBpfElf<E, I> {
         Self::fixup_relative_calls(
             bpf_functions,
             &mut elf_bytes
-                .get_mut(text_section.file_range())
+                .get_mut(text_section.file_range().unwrap_or_default())
                 .ok_or(ElfError::OutOfBounds)?,
         )?;
+
+        let mut syscall_cache = BTreeMap::new();
+        let text_section = Self::get_section(elf, ".text")?;
 
         // Fixup all the relocations in the relocation section if exists
         for relocation in &elf.dynrels {
@@ -577,13 +587,12 @@ impl<'a, E: UserDefinedError, I: InstructionMeter> EBpfElf<E, I> {
                     // final "physical address" from the VM's perspetive is rooted at `MM_PROGRAM_START`
                     let refd_pa = ebpf::MM_PROGRAM_START.saturating_add(refd_va);
 
-                    // trace!(
-                    //     "Relocation section va {:#x} off {:#x} va {:#x} pa {:#x} va {:#x} pa {:#x}",
-                    //     section_infos[target_section].va, target_offset, relocation.addr, section_infos[target_section].bytes.as_ptr() as usize + target_offset, refd_va, refd_pa
-                    // );
-
                     // Write the physical address back into the target location
-                    if text_section.file_range().contains(&r_offset) {
+                    if text_section
+                        .file_range()
+                        .unwrap_or_default()
+                        .contains(&r_offset)
+                    {
                         // Instruction lddw spans two instruction slots, split the
                         // physical address into a high and low and write into both slot's imm field
 
@@ -618,10 +627,8 @@ impl<'a, E: UserDefinedError, I: InstructionMeter> EBpfElf<E, I> {
                         .ok_or(ElfError::UnknownSymbol(relocation.r_sym))?;
                     let name = elf
                         .dynstrtab
-                        .get(sym.st_name)
-                        .ok_or(ElfError::UnknownSymbol(sym.st_name))?
-                        .map_err(|_| ElfError::UnknownSymbol(sym.st_name))?;
-                    let text_section = Self::get_section(elf, ".text")?;
+                        .get_at(sym.st_name)
+                        .ok_or(ElfError::UnknownSymbol(sym.st_name))?;
                     let hash = if sym.is_function() && sym.st_value != 0 {
                         // bpf call
                         if !text_section.vm_range().contains(&(sym.st_value as usize)) {
@@ -632,7 +639,20 @@ impl<'a, E: UserDefinedError, I: InstructionMeter> EBpfElf<E, I> {
                         register_bpf_function(bpf_functions, target_pc, name)?
                     } else {
                         // syscall
-                        ebpf::hash_symbol_name(name.as_bytes())
+                        let hash = syscall_cache
+                            .entry(sym.st_name)
+                            .or_insert_with(|| (ebpf::hash_symbol_name(name.as_bytes()), name))
+                            .0;
+                        if config.reject_unresolved_syscalls
+                            && syscall_registry.lookup_syscall(hash).is_none()
+                        {
+                            return Err(ElfError::UnresolvedSymbol(
+                                name.to_string(),
+                                r_offset / ebpf::INSN_SIZE + ebpf::ELF_INSN_DUMP_OFFSET,
+                                r_offset,
+                            ));
+                        }
+                        hash
                     };
                     let mut checked_slice = elf_bytes
                         .get_mut(imm_offset..imm_offset.saturating_add(BYTE_LENGTH_IMMEIDATE))
@@ -642,6 +662,12 @@ impl<'a, E: UserDefinedError, I: InstructionMeter> EBpfElf<E, I> {
                 _ => return Err(ElfError::UnknownRelocation(relocation.r_type)),
             }
         }
+
+        // Save hashed syscall names for debugging
+        *syscall_symbols = syscall_cache
+            .values()
+            .map(|(hash, name)| (*hash, name.to_string()))
+            .collect();
 
         // Register all known function names from the symbol table
         for symbol in &elf.syms {
@@ -657,9 +683,8 @@ impl<'a, E: UserDefinedError, I: InstructionMeter> EBpfElf<E, I> {
             let target_pc = (symbol.st_value - text_section.sh_addr) as usize / ebpf::INSN_SIZE;
             let name = elf
                 .strtab
-                .get(symbol.st_name)
-                .ok_or(ElfError::UnknownSymbol(symbol.st_name))?
-                .map_err(|_| ElfError::UnknownSymbol(symbol.st_name))?;
+                .get_at(symbol.st_name)
+                .ok_or(ElfError::UnknownSymbol(symbol.st_name))?;
             register_bpf_function(bpf_functions, target_pc, name)?;
         }
 
@@ -685,11 +710,27 @@ impl<'a, E: UserDefinedError, I: InstructionMeter> EBpfElf<E, I> {
 mod test {
     use super::*;
     use crate::{
-        ebpf, elf::scroll::Pwrite, fuzz::fuzz, user_error::UserError, vm::DefaultInstructionMeter,
+        ebpf,
+        elf::scroll::Pwrite,
+        fuzz::fuzz,
+        syscalls::{BpfSyscallString, BpfSyscallU64},
+        user_error::UserError,
+        vm::{DefaultInstructionMeter, SyscallObject},
     };
     use rand::{distributions::Uniform, Rng};
     use std::{fs::File, io::Read};
     type ElfExecutable = EBpfElf<UserError, DefaultInstructionMeter>;
+
+    fn syscall_registry() -> SyscallRegistry {
+        let mut syscall_registry = SyscallRegistry::default();
+        syscall_registry
+            .register_syscall_by_name(b"log", BpfSyscallString::call)
+            .unwrap();
+        syscall_registry
+            .register_syscall_by_name(b"log_64", BpfSyscallU64::call)
+            .unwrap();
+        syscall_registry
+    }
 
     #[test]
     fn test_validate() {
@@ -729,7 +770,8 @@ mod test {
         let mut elf_bytes = Vec::new();
         file.read_to_end(&mut elf_bytes)
             .expect("failed to read elf file");
-        ElfExecutable::load(Config::default(), &elf_bytes).expect("validation failed");
+        ElfExecutable::load(Config::default(), &elf_bytes, syscall_registry())
+            .expect("validation failed");
     }
 
     #[test]
@@ -738,7 +780,8 @@ mod test {
         let mut elf_bytes = Vec::new();
         file.read_to_end(&mut elf_bytes)
             .expect("failed to read elf file");
-        let elf = ElfExecutable::load(Config::default(), &elf_bytes).expect("validation failed");
+        let elf = ElfExecutable::load(Config::default(), &elf_bytes, syscall_registry())
+            .expect("validation failed");
         let mut parsed_elf = Elf::parse(&elf_bytes).unwrap();
         let initial_e_entry = parsed_elf.header.e_entry;
         let executable: &dyn Executable<UserError, DefaultInstructionMeter> = &elf;
@@ -752,7 +795,8 @@ mod test {
         parsed_elf.header.e_entry += 8;
         let mut elf_bytes = elf_bytes.clone();
         elf_bytes.pwrite(parsed_elf.header, 0).unwrap();
-        let elf = ElfExecutable::load(Config::default(), &elf_bytes).expect("validation failed");
+        let elf = ElfExecutable::load(Config::default(), &elf_bytes, syscall_registry())
+            .expect("validation failed");
         let executable: &dyn Executable<UserError, DefaultInstructionMeter> = &elf;
         assert_eq!(
             1,
@@ -766,7 +810,7 @@ mod test {
         elf_bytes.pwrite(parsed_elf.header, 0).unwrap();
         assert_eq!(
             Err(ElfError::EntrypointOutOfBounds),
-            ElfExecutable::load(Config::default(), &elf_bytes)
+            ElfExecutable::load(Config::default(), &elf_bytes, syscall_registry())
         );
 
         parsed_elf.header.e_entry = std::u64::MAX;
@@ -774,7 +818,7 @@ mod test {
         elf_bytes.pwrite(parsed_elf.header, 0).unwrap();
         assert_eq!(
             Err(ElfError::EntrypointOutOfBounds),
-            ElfExecutable::load(Config::default(), &elf_bytes)
+            ElfExecutable::load(Config::default(), &elf_bytes, syscall_registry())
         );
 
         parsed_elf.header.e_entry = initial_e_entry + ebpf::INSN_SIZE as u64 + 1;
@@ -782,13 +826,14 @@ mod test {
         elf_bytes.pwrite(parsed_elf.header, 0).unwrap();
         assert_eq!(
             Err(ElfError::InvalidEntrypoint),
-            ElfExecutable::load(Config::default(), &elf_bytes)
+            ElfExecutable::load(Config::default(), &elf_bytes, syscall_registry())
         );
 
         parsed_elf.header.e_entry = initial_e_entry;
         let mut elf_bytes = elf_bytes;
         elf_bytes.pwrite(parsed_elf.header, 0).unwrap();
-        let elf = ElfExecutable::load(Config::default(), &elf_bytes).expect("validation failed");
+        let elf = ElfExecutable::load(Config::default(), &elf_bytes, syscall_registry())
+            .expect("validation failed");
         let executable: &dyn Executable<UserError, DefaultInstructionMeter> = &elf;
         assert_eq!(
             0,
@@ -953,7 +998,7 @@ mod test {
         println!("random bytes");
         for _ in 0..1_000 {
             let elf_bytes: Vec<u8> = (0..100).map(|_| rng.sample(&range)).collect();
-            let _ = ElfExecutable::load(Config::default(), &elf_bytes);
+            let _ = ElfExecutable::load(Config::default(), &elf_bytes, SyscallRegistry::default());
         }
 
         // Take a real elf and mangle it
@@ -973,7 +1018,7 @@ mod test {
             0..parsed_elf.header.e_ehsize as usize,
             0..255,
             |bytes: &mut [u8]| {
-                let _ = ElfExecutable::load(Config::default(), bytes);
+                let _ = ElfExecutable::load(Config::default(), bytes, SyscallRegistry::default());
             },
         );
 
@@ -986,7 +1031,7 @@ mod test {
             parsed_elf.header.e_shoff as usize..elf_bytes.len(),
             0..255,
             |bytes: &mut [u8]| {
-                let _ = ElfExecutable::load(Config::default(), bytes);
+                let _ = ElfExecutable::load(Config::default(), bytes, SyscallRegistry::default());
             },
         );
 
@@ -999,7 +1044,7 @@ mod test {
             0..elf_bytes.len(),
             0..255,
             |bytes: &mut [u8]| {
-                let _ = ElfExecutable::load(Config::default(), bytes);
+                let _ = ElfExecutable::load(Config::default(), bytes, SyscallRegistry::default());
             },
         );
     }
