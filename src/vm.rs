@@ -37,7 +37,7 @@ use std::{
 ///   - Unknown instructions.
 ///   - Bad formed instruction.
 ///   - Unknown eBPF syscall index.
-pub type Verifier = fn(prog: &[u8]) -> Result<(), VerifierError>;
+pub type Verifier = fn(prog: &[u8], config: &Config) -> Result<(), VerifierError>;
 
 /// Return value of programs and syscalls
 pub type ProgramResult<E> = Result<u64, EbpfError<E>>;
@@ -193,6 +193,8 @@ pub struct Config {
     pub sanitize_user_provided_values: bool,
     /// Encrypt the environment registers in JIT
     pub encrypt_environment_registers: bool,
+    /// Feature flag for the MUL64_IMM != 0 verification check
+    pub verify_mul64_imm_nonzero: bool,
 }
 impl Default for Config {
     fn default() -> Self {
@@ -206,6 +208,7 @@ impl Default for Config {
             noop_instruction_ratio: 1.0 / 256.0,
             sanitize_user_provided_values: true,
             encrypt_environment_registers: true,
+            verify_mul64_imm_nonzero: false,
         }
     }
 }
@@ -252,9 +255,9 @@ impl<E: UserDefinedError, I: 'static + InstructionMeter> dyn Executable<E, I> {
         syscall_registry: SyscallRegistry,
     ) -> Result<Box<Self>, EbpfError<E>> {
         let ebpf_elf = EBpfElf::load(config, elf_bytes, syscall_registry)?;
-        let (_, bytes) = ebpf_elf.get_text_bytes()?;
+        let text_bytes = ebpf_elf.get_text_bytes()?.1;
         if let Some(verifier) = verifier {
-            verifier(bytes)?;
+            verifier(text_bytes, &config)?;
         }
         Ok(Box::new(ebpf_elf))
     }
@@ -267,7 +270,7 @@ impl<E: UserDefinedError, I: 'static + InstructionMeter> dyn Executable<E, I> {
         bpf_functions: BTreeMap<u32, (usize, String)>,
     ) -> Result<Box<Self>, EbpfError<E>> {
         if let Some(verifier) = verifier {
-            verifier(text_bytes).map_err(EbpfError::VerifierError)?;
+            verifier(text_bytes, &config).map_err(EbpfError::VerifierError)?;
         }
         Ok(Box::new(EBpfElf::new_from_text_bytes(
             config,
