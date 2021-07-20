@@ -117,7 +117,7 @@ fn main() {
         enable_instruction_tracing: matches.is_present("trace") || matches.is_present("profile"),
         ..Config::default()
     };
-    let verifier: Option<for<'r> fn(&'r [u8]) -> std::result::Result<_, _>> =
+    let verifier: Option<for<'r> fn(&'r [u8], &Config) -> std::result::Result<_, _>> =
         if matches.is_present("verify") {
             Some(check)
         } else {
