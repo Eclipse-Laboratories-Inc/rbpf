@@ -176,7 +176,7 @@ fn check_imm_register(insn: &ebpf::Insn, insn_ptr: usize) -> Result<(), Verifier
 
 /// Check the program against the verifier's rules
 #[rustfmt::skip]
-pub fn check(prog: &[u8], config: &Config) -> Result<(), VerifierError> {
+pub fn check(prog: &[u8], _config: &Config) -> Result<(), VerifierError> {
     check_prog_len(prog)?;
 
     let mut insn_ptr: usize = 0;
@@ -232,9 +232,9 @@ pub fn check(prog: &[u8], config: &Config) -> Result<(), VerifierError> {
             ebpf::OR32_REG   => {},
             ebpf::AND32_IMM  => {},
             ebpf::AND32_REG  => {},
-            ebpf::LSH32_IMM  => { check_imm_shift(&insn, insn_ptr, if config.verify_shift32_imm { 32 } else { 64 })?; },
+            ebpf::LSH32_IMM  => { check_imm_shift(&insn, insn_ptr, 32)?; },
             ebpf::LSH32_REG  => {},
-            ebpf::RSH32_IMM  => { check_imm_shift(&insn, insn_ptr, if config.verify_shift32_imm { 32 } else { 64 })?; },
+            ebpf::RSH32_IMM  => { check_imm_shift(&insn, insn_ptr, 32)?; },
             ebpf::RSH32_REG  => {},
             ebpf::NEG32      => {},
             ebpf::MOD32_IMM  => { check_imm_nonzero(&insn, insn_ptr)?; },
@@ -243,7 +243,7 @@ pub fn check(prog: &[u8], config: &Config) -> Result<(), VerifierError> {
             ebpf::XOR32_REG  => {},
             ebpf::MOV32_IMM  => {},
             ebpf::MOV32_REG  => {},
-            ebpf::ARSH32_IMM => { check_imm_shift(&insn, insn_ptr, if config.verify_shift32_imm { 32 } else { 64 })?; },
+            ebpf::ARSH32_IMM => { check_imm_shift(&insn, insn_ptr, 32)?; },
             ebpf::ARSH32_REG => {},
             ebpf::LE         => { check_imm_endian(&insn, insn_ptr)?; },
             ebpf::BE         => { check_imm_endian(&insn, insn_ptr)?; },
@@ -253,11 +253,7 @@ pub fn check(prog: &[u8], config: &Config) -> Result<(), VerifierError> {
             ebpf::ADD64_REG  => {},
             ebpf::SUB64_IMM  => {},
             ebpf::SUB64_REG  => {},
-            ebpf::MUL64_IMM  => {
-                if config.verify_mul64_imm_nonzero {
-                    check_imm_nonzero(&insn, insn_ptr)?;
-                }
-            },
+            ebpf::MUL64_IMM  => {},
             ebpf::MUL64_REG  => {},
             ebpf::DIV64_IMM  => { check_imm_nonzero(&insn, insn_ptr)?; },
             ebpf::DIV64_REG  => {},

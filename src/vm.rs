@@ -191,22 +191,14 @@ pub struct Config {
     pub enable_instruction_tracing: bool,
     /// Enable dynamic string allocation for labels
     pub enable_symbol_and_section_labels: bool,
-    /// Reject ELF files containing syscalls which are not in the SyscallRegistry
-    pub reject_unresolved_syscalls: bool,
-    /// Reject ELF files containing section headers where sh_addr != sh_offset
-    pub reject_section_virtual_address_file_offset_mismatch: bool,
-    /// Reject ELF files containing writable data sections
-    pub reject_all_writable_sections: bool,
+    /// Reject ELF files containing issues that the verifier did not catch before (up to v0.2.21)
+    pub reject_broken_elfs: bool,
     /// Ratio of random no-ops per instruction in JIT (0.0 = OFF)
     pub noop_instruction_ratio: f64,
     /// Enable disinfection of immediate values and offsets provided by the user in JIT
     pub sanitize_user_provided_values: bool,
     /// Encrypt the environment registers in JIT
     pub encrypt_environment_registers: bool,
-    /// Feature flag for the MUL64_IMM != 0 verification check
-    pub verify_mul64_imm_nonzero: bool,
-    /// Feature flag for the SHIFT_IMM >= 32 verification check
-    pub verify_shift32_imm: bool,
 }
 impl Default for Config {
     fn default() -> Self {
@@ -218,14 +210,10 @@ impl Default for Config {
             enable_instruction_meter: true,
             enable_instruction_tracing: false,
             enable_symbol_and_section_labels: false,
-            reject_unresolved_syscalls: false,
-            reject_section_virtual_address_file_offset_mismatch: false,
-            reject_all_writable_sections: false,
+            reject_broken_elfs: false,
             noop_instruction_ratio: 1.0 / 256.0,
             sanitize_user_provided_values: true,
             encrypt_environment_registers: true,
-            verify_mul64_imm_nonzero: false,
-            verify_shift32_imm: false,
         }
     }
 }
