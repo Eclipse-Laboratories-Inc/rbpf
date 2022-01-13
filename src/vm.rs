@@ -27,6 +27,7 @@ use log::debug;
 use std::{
     collections::{BTreeMap, HashMap},
     fmt::Debug,
+    mem,
     pin::Pin,
     u32,
 };
@@ -171,6 +172,13 @@ impl SyscallRegistry {
     /// Get the number of registered syscalls
     pub fn get_number_of_syscalls(&self) -> usize {
         self.entries.len()
+    }
+
+    /// Calculate memory size
+    pub fn mem_size(&self) -> usize {
+        mem::size_of::<Self>()
+            + self.entries.capacity() * mem::size_of::<(u32, Syscall)>()
+            + self.context_object_slots.capacity() * mem::size_of::<(u64, usize)>()
     }
 }
 

@@ -215,6 +215,11 @@ struct SectionInfo {
     vaddr: u64,
     offset_range: Range<usize>,
 }
+impl SectionInfo {
+    fn mem_size(&self) -> usize {
+        mem::size_of::<Self>().saturating_add(self.name.capacity())
+    }
+}
 
 /// Elf loader/relocator
 #[derive(Debug, PartialEq)]
@@ -493,6 +498,41 @@ impl<E: UserDefinedError, I: InstructionMeter> Executable<E, I> {
             syscall_registry,
             compiled_program: None,
         })
+    }
+
+    /// Calculate the total memory size of the executable
+    #[rustfmt::skip]
+    pub fn mem_size(&self) -> usize {
+        let total = mem::size_of::<Self>()
+            // elf bytres
+            .saturating_add(self.elf_bytes.mem_size()
+            // ro section
+            .saturating_add(self.ro_section.capacity()
+            // text section info
+            .saturating_add(self.text_section_info.mem_size()
+            // bpf functions
+            .saturating_add(mem::size_of_val(&self.bpf_functions)
+            .saturating_add(self.bpf_functions
+            .iter()
+            .fold(0, |state: usize, (_, (val, name))| state
+                .saturating_add(mem::size_of_val(&val)
+                .saturating_add(mem::size_of_val(&name)
+                .saturating_add(name.capacity()))))
+            // syscall symbols
+            .saturating_add(mem::size_of_val(&self.syscall_symbols)
+            .saturating_add(self.syscall_symbols
+            .iter()
+            .fold(0, |state: usize, (val, name)| state
+                .saturating_add(mem::size_of_val(&val)
+                .saturating_add(mem::size_of_val(&name)
+                .saturating_add(name.capacity()))))
+            // syscall registry
+            .saturating_add(self.syscall_registry.mem_size()
+            // compiled programs
+            .saturating_add(self.compiled_program.as_ref().map_or(0, |program| program.mem_size()
+        ))))))))));
+
+        total as usize
     }
 
     // Functions exposed for tests
@@ -1205,5 +1245,22 @@ mod test {
             std::fs::read("tests/elfs/bss_section.so").expect("failed to read elf file");
         ElfExecutable::load(Config::default(), &elf_bytes, syscall_registry())
             .expect("validation failed");
+    }
+
+    #[cfg(all(not(windows), target_arch = "x86_64"))]
+    #[test]
+    fn test_size() {
+        let mut file = File::open("tests/elfs/noop.so").expect("file open failed");
+        let mut elf_bytes = Vec::new();
+        file.read_to_end(&mut elf_bytes)
+            .expect("failed to read elf file");
+        let mut executable =
+            ElfExecutable::from_elf(&elf_bytes, None, Config::default(), syscall_registry())
+                .expect("validation failed");
+        {
+            Executable::jit_compile(&mut executable).unwrap();
+        }
+
+        assert_eq!(22784, executable.mem_size());
     }
 }
