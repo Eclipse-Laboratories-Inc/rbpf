@@ -183,7 +183,8 @@ impl<E: UserDefinedError, I: InstructionMeter> JitProgram<E, I> {
 }
 
 // Special values for target_pc in struct Jump
-const TARGET_PC_TRACE: usize = std::usize::MAX - 31;
+const TARGET_PC_TRACE: usize = std::usize::MAX - 32;
+const TARGET_PC_SYSCALL: usize = std::usize::MAX - 31;
 const TARGET_PC_BPF_CALL_PROLOGUE: usize = std::usize::MAX - 30;
 const TARGET_PC_BPF_CALL_REG: usize = std::usize::MAX - 29;
 const TARGET_PC_TRANSLATE_PC: usize = std::usize::MAX - 28;
@@ -291,12 +292,6 @@ fn emit_sanitized_load_immediate<E: UserDefinedError>(jit: &mut JitCompiler, siz
     }
 }
 
-fn emit_sanitized_load<E: UserDefinedError>(jit: &mut JitCompiler, size: OperandSize, source: u8, destination: u8, offset: i32) -> Result<(), EbpfError<E>> {
-    let key: i32 = jit.diversification_rng.gen();
-    X86Instruction::load_immediate(OperandSize::S64, destination, offset.wrapping_sub(key) as i64).emit(jit)?;
-    X86Instruction::load(size, source, destination, X86IndirectAccess::OffsetIndexShift(key, destination, 0)).emit(jit)
-}
-
 #[inline]
 fn emit_alu<E: UserDefinedError>(jit: &mut JitCompiler, size: OperandSize, opcode: u8, source: u8, destination: u8, immediate: i64, indirect: Option<X86IndirectAccess>) -> Result<(), EbpfError<E>> {
     X86Instruction {
@@ -385,8 +380,8 @@ fn slot_on_environment_stack(jit: &JitCompiler, slot: EnvironmentStackSlot) -> i
 #[inline]
 fn emit_stopwatch<E: UserDefinedError>(jit: &mut JitCompiler, begin: bool) -> Result<(), EbpfError<E>> {
     jit.stopwatch_is_active = true;
-    X86Instruction::push(RDX).emit(jit)?;
-    X86Instruction::push(RAX).emit(jit)?;
+    X86Instruction::push(RDX, None).emit(jit)?;
+    X86Instruction::push(RAX, None).emit(jit)?;
     X86Instruction::fence(FenceType::Load).emit(jit)?; // lfence
     X86Instruction::cycle_count().emit(jit)?; // rdtsc
     X86Instruction::fence(FenceType::Load).emit(jit)?; // lfence
@@ -559,7 +554,7 @@ fn emit_bpf_call<E: UserDefinedError>(jit: &mut JitCompiler, dst: Value) -> Resu
     match dst {
         Value::Register(reg) => {
             // Move vm target_address into RAX
-            X86Instruction::push(REGISTER_MAP[0]).emit(jit)?;
+            X86Instruction::push(REGISTER_MAP[0], None).emit(jit)?;
             if reg != REGISTER_MAP[0] {
                 X86Instruction::mov(OperandSize::S64, reg, REGISTER_MAP[0]).emit(jit)?; 
             }
@@ -616,53 +611,49 @@ impl Argument {
         match self.value {
             Value::Register(reg) => {
                 if is_stack_argument {
-                    return X86Instruction::push(reg).emit(jit);
+                    X86Instruction::push(reg, None).emit(jit)?;
                 } else if reg != dst {
                     X86Instruction::mov(OperandSize::S64, reg, dst).emit(jit)?;
                 }
             },
             Value::RegisterIndirect(reg, offset, user_provided) => {
-                if user_provided && jit.config.sanitize_user_provided_values {
-                    emit_sanitized_load(jit, OperandSize::S64, reg, dst, offset)?;
+                debug_assert!(!user_provided);
+                if is_stack_argument {
+                    X86Instruction::push(reg, Some(X86IndirectAccess::Offset(offset))).emit(jit)?;
                 } else {
                     X86Instruction::load(OperandSize::S64, reg, dst, X86IndirectAccess::Offset(offset)).emit(jit)?;
                 }
             },
             Value::RegisterPlusConstant32(reg, offset, user_provided) => {
-                if user_provided && jit.config.sanitize_user_provided_values {
-                    emit_sanitized_load_immediate(jit, OperandSize::S64, dst, offset as i64)?;
-                    emit_alu(jit, OperandSize::S64, 0x01, reg, dst, 0, None)?;
+                debug_assert!(!user_provided);
+                if is_stack_argument {
+                    X86Instruction::push(reg, None).emit(jit)?;
+                    emit_alu(jit, OperandSize::S64, 0x81, 0, RSP, offset as i64, Some(X86IndirectAccess::OffsetIndexShift(0, RSP, 0)))?;
                 } else {
                     X86Instruction::lea(OperandSize::S64, reg, dst, Some(X86IndirectAccess::Offset(offset))).emit(jit)?;
                 }
             },
             Value::RegisterPlusConstant64(reg, offset, user_provided) => {
-                if user_provided && jit.config.sanitize_user_provided_values {
-                    emit_sanitized_load_immediate(jit, OperandSize::S64, R11, offset)?;
+                debug_assert!(!user_provided);
+                if is_stack_argument {
+                    X86Instruction::push(reg, None).emit(jit)?;
+                    emit_alu(jit, OperandSize::S64, 0x81, 0, RSP, offset, Some(X86IndirectAccess::OffsetIndexShift(0, RSP, 0)))?;
                 } else {
-                    X86Instruction::load_immediate(OperandSize::S64, R11, offset).emit(jit)?;
+                    X86Instruction::load_immediate(OperandSize::S64, dst, offset).emit(jit)?;
+                    emit_alu(jit, OperandSize::S64, 0x01, reg, dst, 0, None)?;
                 }
-                emit_alu(jit, OperandSize::S64, 0x01, reg, R11, 0, None)?;
-                X86Instruction::mov(OperandSize::S64, R11, dst).emit(jit)?;
             },
             Value::Constant64(value, user_provided) => {
-                if user_provided && jit.config.sanitize_user_provided_values {
-                    emit_sanitized_load_immediate(jit, OperandSize::S64, dst, value)?;
-                } else {
-                    X86Instruction::load_immediate(OperandSize::S64, dst, value).emit(jit)?;
-                }
+                debug_assert!(!user_provided && !is_stack_argument);
+                X86Instruction::load_immediate(OperandSize::S64, dst, value).emit(jit)?;
             },
         }
-        if is_stack_argument {
-            X86Instruction::push(dst).emit(jit)
-        } else {
-            Ok(())
-        }
+        Ok(())
     }
 }
 
 #[inline]
-fn emit_rust_call<E: UserDefinedError>(jit: &mut JitCompiler, function: *const u8, arguments: &[Argument], result_reg: Option<u8>, check_exception: bool) -> Result<(), EbpfError<E>> {
+fn emit_rust_call<E: UserDefinedError>(jit: &mut JitCompiler, dst: Value, arguments: &[Argument], result_reg: Option<u8>, check_exception: bool) -> Result<(), EbpfError<E>> {
     let mut saved_registers = CALLER_SAVED_REGISTERS.to_vec();
     if let Some(reg) = result_reg {
         let dst = saved_registers.iter().position(|x| *x == reg);
@@ -674,7 +665,7 @@ fn emit_rust_call<E: UserDefinedError>(jit: &mut JitCompiler, function: *const u
 
     // Save registers on stack
     for reg in saved_registers.iter() {
-        X86Instruction::push(*reg).emit(jit)?;
+        X86Instruction::push(*reg, None).emit(jit)?;
     }
 
     // Pass arguments
@@ -686,9 +677,20 @@ fn emit_rust_call<E: UserDefinedError>(jit: &mut JitCompiler, function: *const u
         argument.emit_pass(jit)?;
     }
 
-    // TODO use direct call when possible
-    X86Instruction::load_immediate(OperandSize::S64, RAX, function as i64).emit(jit)?;
-    X86Instruction::call_reg(OperandSize::S64, RAX, None).emit(jit)?; // callq *%rax
+    match dst {
+        Value::Register(reg) => {
+            X86Instruction::call_reg(OperandSize::S64, reg, None).emit(jit)?;
+        },
+        Value::Constant64(value, user_provided) => {
+            debug_assert!(!user_provided);
+            X86Instruction::load_immediate(OperandSize::S64, RAX, value).emit(jit)?;
+            X86Instruction::call_reg(OperandSize::S64, RAX, None).emit(jit)?;
+        },
+        _ => {
+            #[cfg(debug_assertions)]
+            unreachable!();
+        }
+    }
 
     // Save returned value in result register
     if let Some(reg) = result_reg {
@@ -751,13 +753,13 @@ fn emit_shift<E: UserDefinedError>(jit: &mut JitCompiler, size: OperandSize, opc
         if destination == RCX {
             emit_alu(jit, size, 0xd3, opcode_extension, destination, 0, None)
         } else {
-            X86Instruction::push(RCX).emit(jit)?;
+            X86Instruction::push(RCX, None).emit(jit)?;
             emit_alu(jit, size, 0xd3, opcode_extension, destination, 0, None)?;
             X86Instruction::pop(RCX).emit(jit)
         }
     } else if destination == RCX {
         if source != R11 {
-            X86Instruction::push(source).emit(jit)?;
+            X86Instruction::push(source, None).emit(jit)?;
         }
         X86Instruction::xchg(OperandSize::S64, source, RCX, None).emit(jit)?;
         emit_alu(jit, size, 0xd3, opcode_extension, source, 0, None)?;
@@ -767,7 +769,7 @@ fn emit_shift<E: UserDefinedError>(jit: &mut JitCompiler, size: OperandSize, opc
         }
         Ok(())
     } else {
-        X86Instruction::push(RCX).emit(jit)?;
+        X86Instruction::push(RCX, None).emit(jit)?;
         X86Instruction::mov(OperandSize::S64, source, RCX).emit(jit)?;
         emit_alu(jit, size, 0xd3, opcode_extension, destination, 0, None)?;
         X86Instruction::pop(RCX).emit(jit)
@@ -788,10 +790,10 @@ fn emit_muldivmod<E: UserDefinedError>(jit: &mut JitCompiler, opc: u8, src: u8, 
     }
 
     if dst != RAX {
-        X86Instruction::push(RAX).emit(jit)?;
+        X86Instruction::push(RAX, None).emit(jit)?;
     }
     if dst != RDX {
-        X86Instruction::push(RDX).emit(jit)?;
+        X86Instruction::push(RDX, None).emit(jit)?;
     }
 
     if let Some(imm) = imm {
@@ -928,7 +930,7 @@ impl JitCompiler {
             };
         }
 
-        let mut code_length_estimate = pc * 256 + 4096;
+        let mut code_length_estimate = pc * 110 + 4096;
         code_length_estimate += (code_length_estimate as f64 * _config.noop_instruction_ratio) as usize;
         let mut diversification_rng = SmallRng::from_rng(rand::thread_rng()).unwrap();
         let (environment_stack_key, program_argument_key) = 
@@ -972,7 +974,7 @@ impl JitCompiler {
         emit_jmp(self, entry)?;
 
         // Have these in front so that the linear search of TARGET_PC_TRANSLATE_PC does not terminate early
-        self.generate_helper_routines::<E>()?;
+        self.generate_helper_routines::<E, I>()?;
         self.generate_exception_handlers::<E>()?;
 
         while self.pc * ebpf::INSN_SIZE < program.len() {
@@ -1232,41 +1234,13 @@ impl JitCompiler {
                     if let Some(syscall) = executable.get_syscall_registry().lookup_syscall(insn.imm as u32) {
                         if self.config.enable_instruction_meter {
                             emit_validate_and_profile_instruction_count(self, true, Some(0))?;
-                            X86Instruction::load(OperandSize::S64, RBP, R11, X86IndirectAccess::Offset(slot_on_environment_stack(self, EnvironmentStackSlot::PrevInsnMeter))).emit(self)?;
-                            emit_alu(self, OperandSize::S64, 0x29, ARGUMENT_REGISTERS[0], R11, 0, None)?;
-                            X86Instruction::mov(OperandSize::S64, R11, ARGUMENT_REGISTERS[0]).emit(self)?;
-                            X86Instruction::load(OperandSize::S64, RBP, R11, X86IndirectAccess::Offset(slot_on_environment_stack(self, EnvironmentStackSlot::InsnMeterPtr))).emit(self)?;
-                            emit_rust_call(self, I::consume as *const u8, &[
-                                Argument { index: 1, value: Value::Register(ARGUMENT_REGISTERS[0]) },
-                                Argument { index: 0, value: Value::Register(R11) },
-                            ], None, false)?;
                         }
-
+                        X86Instruction::load_immediate(OperandSize::S64, R11, syscall.function as *const u8 as i64).emit(self)?;
                         X86Instruction::load(OperandSize::S64, R10, RAX, X86IndirectAccess::Offset((SYSCALL_CONTEXT_OBJECTS_OFFSET + syscall.context_object_slot) as i32 * 8 + self.program_argument_key)).emit(self)?;
-                        emit_rust_call(self, syscall.function as *const u8, &[
-                            Argument { index: 7, value: Value::RegisterIndirect(RBP, slot_on_environment_stack(self, EnvironmentStackSlot::OptRetValPtr), false) },
-                            Argument { index: 6, value: Value::RegisterPlusConstant32(R10, self.program_argument_key, false) }, // jit_program_argument.memory_mapping
-                            Argument { index: 5, value: Value::Register(ARGUMENT_REGISTERS[5]) },
-                            Argument { index: 4, value: Value::Register(ARGUMENT_REGISTERS[4]) },
-                            Argument { index: 3, value: Value::Register(ARGUMENT_REGISTERS[3]) },
-                            Argument { index: 2, value: Value::Register(ARGUMENT_REGISTERS[2]) },
-                            Argument { index: 1, value: Value::Register(ARGUMENT_REGISTERS[1]) },
-                            Argument { index: 0, value: Value::Register(RAX) }, // "&mut self" in the "call" method of the SyscallObject
-                        ], None, false)?;
-
+                        emit_call(self, TARGET_PC_SYSCALL)?;
                         if self.config.enable_instruction_meter {
-                            X86Instruction::load(OperandSize::S64, RBP, R11, X86IndirectAccess::Offset(slot_on_environment_stack(self, EnvironmentStackSlot::InsnMeterPtr))).emit(self)?;
-                            emit_rust_call(self, I::get_remaining as *const u8, &[
-                                Argument { index: 0, value: Value::Register(R11) },
-                            ], Some(ARGUMENT_REGISTERS[0]), false)?;
-                            X86Instruction::store(OperandSize::S64, ARGUMENT_REGISTERS[0], RBP, X86IndirectAccess::Offset(slot_on_environment_stack(self, EnvironmentStackSlot::PrevInsnMeter))).emit(self)?;
                             emit_undo_profile_instruction_count(self, 0)?;
                         }
-
-                        // Store Ok value in result register
-                        X86Instruction::load(OperandSize::S64, RBP, R11, X86IndirectAccess::Offset(slot_on_environment_stack(self, EnvironmentStackSlot::OptRetValPtr))).emit(self)?;
-                        X86Instruction::load(OperandSize::S64, R11, REGISTER_MAP[0], X86IndirectAccess::Offset(8)).emit(self)?;
-
                         // Throw error if the result indicates one
                         X86Instruction::cmp_immediate(OperandSize::S64, R11, 0, Some(X86IndirectAccess::Offset(0))).emit(self)?;
                         X86Instruction::load_immediate(OperandSize::S64, R11, self.pc as i64).emit(self)?;
@@ -1276,7 +1250,7 @@ impl JitCompiler {
                     } else {
                         // executable.report_unresolved_symbol(self.pc)?;
                         // Workaround for unresolved symbols in ELF: Report error at runtime instead of compiletime
-                        emit_rust_call(self, Executable::<E, I>::report_unresolved_symbol as *const _, &[
+                        emit_rust_call(self, Value::Constant64(Executable::<E, I>::report_unresolved_symbol as *const u8 as i64, false), &[
                             Argument { index: 2, value: Value::Constant64(self.pc as i64, false) },
                             Argument { index: 1, value: Value::Constant64(&*executable.as_ref() as *const _ as i64, false) },
                             Argument { index: 0, value: Value::RegisterIndirect(RBP, slot_on_environment_stack(self, EnvironmentStackSlot::OptRetValPtr), false) },
@@ -1330,18 +1304,18 @@ impl JitCompiler {
         Ok(())
     }
 
-    fn generate_helper_routines<E: UserDefinedError>(&mut self) -> Result<(), EbpfError<E>> {
+    fn generate_helper_routines<E: UserDefinedError, I: InstructionMeter>(&mut self) -> Result<(), EbpfError<E>> {
         // Routine for instruction tracing
         if self.config.enable_instruction_tracing {
             set_anchor(self, TARGET_PC_TRACE);
             // Save registers on stack
-            X86Instruction::push(R11).emit(self)?;
+            X86Instruction::push(R11, None).emit(self)?;
             for reg in REGISTER_MAP.iter().rev() {
-                X86Instruction::push(*reg).emit(self)?;
+                X86Instruction::push(*reg, None).emit(self)?;
             }
             X86Instruction::mov(OperandSize::S64, RSP, REGISTER_MAP[0]).emit(self)?;
             emit_alu(self, OperandSize::S64, 0x81, 0, RSP, - 8 * 3, None)?; // RSP -= 8 * 3;
-            emit_rust_call(self, Tracer::trace as *const u8, &[
+            emit_rust_call(self, Value::Constant64(Tracer::trace as *const u8 as i64, false), &[
                 Argument { index: 1, value: Value::Register(REGISTER_MAP[0]) }, // registers
                 Argument { index: 0, value: Value::RegisterIndirect(R10, mem::size_of::<MemoryMapping>() as i32 + self.program_argument_key, false) }, // jit.tracer
             ], None, false)?;
@@ -1352,6 +1326,40 @@ impl JitCompiler {
             X86Instruction::pop(R11).emit(self)?;
             X86Instruction::return_near().emit(self)?;
         }
+
+        // Routine for syscall
+        set_anchor(self, TARGET_PC_SYSCALL);
+        X86Instruction::push(R11, None).emit(self)?; // Padding for stack alignment
+        if self.config.enable_instruction_meter {
+            // RDI = *PrevInsnMeter - RDI;
+            emit_alu(self, OperandSize::S64, 0x2B, ARGUMENT_REGISTERS[0], RBP, 0, Some(X86IndirectAccess::Offset(slot_on_environment_stack(self, EnvironmentStackSlot::PrevInsnMeter))))?; // RDI -= *PrevInsnMeter;
+            emit_alu(self, OperandSize::S64, 0xf7, 3, ARGUMENT_REGISTERS[0], 0, None)?; // RDI = -RDI;
+            emit_rust_call(self, Value::Constant64(I::consume as *const u8 as i64, false), &[
+                Argument { index: 1, value: Value::Register(ARGUMENT_REGISTERS[0]) },
+                Argument { index: 0, value: Value::RegisterIndirect(RBP, slot_on_environment_stack(self, EnvironmentStackSlot::InsnMeterPtr), false) },
+            ], None, false)?;
+        }
+        emit_rust_call(self, Value::Register(R11), &[
+            Argument { index: 7, value: Value::RegisterIndirect(RBP, slot_on_environment_stack(self, EnvironmentStackSlot::OptRetValPtr), false) },
+            Argument { index: 6, value: Value::RegisterPlusConstant32(R10, self.program_argument_key, false) }, // jit_program_argument.memory_mapping
+            Argument { index: 5, value: Value::Register(ARGUMENT_REGISTERS[5]) },
+            Argument { index: 4, value: Value::Register(ARGUMENT_REGISTERS[4]) },
+            Argument { index: 3, value: Value::Register(ARGUMENT_REGISTERS[3]) },
+            Argument { index: 2, value: Value::Register(ARGUMENT_REGISTERS[2]) },
+            Argument { index: 1, value: Value::Register(ARGUMENT_REGISTERS[1]) },
+            Argument { index: 0, value: Value::Register(RAX) }, // "&mut self" in the "call" method of the SyscallObject
+        ], None, false)?;
+        if self.config.enable_instruction_meter {
+            emit_rust_call(self, Value::Constant64(I::get_remaining as *const u8 as i64, false), &[
+                Argument { index: 0, value: Value::RegisterIndirect(RBP, slot_on_environment_stack(self, EnvironmentStackSlot::InsnMeterPtr), false) },
+            ], Some(ARGUMENT_REGISTERS[0]), false)?;
+            X86Instruction::store(OperandSize::S64, ARGUMENT_REGISTERS[0], RBP, X86IndirectAccess::Offset(slot_on_environment_stack(self, EnvironmentStackSlot::PrevInsnMeter))).emit(self)?;
+        }
+        X86Instruction::pop(R11).emit(self)?;
+        // Store Ok value in result register
+        X86Instruction::load(OperandSize::S64, RBP, R11, X86IndirectAccess::Offset(slot_on_environment_stack(self, EnvironmentStackSlot::OptRetValPtr))).emit(self)?;
+        X86Instruction::load(OperandSize::S64, R11, REGISTER_MAP[0], X86IndirectAccess::Offset(8)).emit(self)?;
+        X86Instruction::return_near().emit(self)?;
 
         // Routine for prologue of emit_bpf_call()
         set_anchor(self, TARGET_PC_BPF_CALL_PROLOGUE);
@@ -1407,7 +1415,7 @@ impl JitCompiler {
 
         // Translates a host pc back to a BPF pc by linear search of the pc_section table
         set_anchor(self, TARGET_PC_TRANSLATE_PC);
-        X86Instruction::push(REGISTER_MAP[0]).emit(self)?; // Save REGISTER_MAP[0]
+        X86Instruction::push(REGISTER_MAP[0], None).emit(self)?; // Save REGISTER_MAP[0]
         X86Instruction::load_immediate(OperandSize::S64, REGISTER_MAP[0], self.result.pc_section.as_ptr() as i64 - 8).emit(self)?; // Loop index and pointer to look up
         set_anchor(self, TARGET_PC_TRANSLATE_PC_LOOP); // Loop label
         emit_alu(self, OperandSize::S64, 0x81, 0, REGISTER_MAP[0], 8, None)?; // Increase index
@@ -1434,11 +1442,11 @@ impl JitCompiler {
             let target_offset = len.trailing_zeros() as usize + 4 * (*access_type as usize);
 
             set_anchor(self, TARGET_PC_TRANSLATE_MEMORY_ADDRESS + target_offset);
-            X86Instruction::push(R11).emit(self)?;
-            X86Instruction::push(RAX).emit(self)?;
-            X86Instruction::push(RCX).emit(self)?;
+            X86Instruction::push(R11, None).emit(self)?;
+            X86Instruction::push(RAX, None).emit(self)?;
+            X86Instruction::push(RCX, None).emit(self)?;
             let stack_offset = if self.config.enable_stack_frame_gaps {
-                X86Instruction::push(RDX).emit(self)?;
+                X86Instruction::push(RDX, None).emit(self)?;
                 24
             } else {
                 16
@@ -1486,7 +1494,7 @@ impl JitCompiler {
             set_anchor(self, TARGET_PC_MEMORY_ACCESS_VIOLATION + target_offset);
             emit_alu(self, OperandSize::S64, 0x31, R11, R11, 0, None)?; // R11 = 0;
             X86Instruction::load(OperandSize::S64, RSP, R11, X86IndirectAccess::OffsetIndexShift(stack_offset, R11, 0)).emit(self)?;
-            emit_rust_call(self, MemoryMapping::generate_access_violation::<UserError> as *const u8, &[
+            emit_rust_call(self, Value::Constant64(MemoryMapping::generate_access_violation::<UserError> as *const u8 as i64, false), &[
                 Argument { index: 3, value: Value::Register(R11) }, // Specify first as the src register could be overwritten by other arguments
                 Argument { index: 4, value: Value::Constant64(*len as i64, false) },
                 Argument { index: 2, value: Value::Constant64(*access_type as i64, false) },
@@ -1562,29 +1570,29 @@ impl JitCompiler {
 
         // Save registers
         for reg in CALLEE_SAVED_REGISTERS.iter() {
-            X86Instruction::push(*reg).emit(self)?;
+            X86Instruction::push(*reg, None).emit(self)?;
         }
 
         // Initialize and save BPF stack pointer
         X86Instruction::load_immediate(OperandSize::S64, REGISTER_MAP[STACK_REG], MM_STACK_START as i64 + self.config.stack_frame_size as i64).emit(self)?;
-        X86Instruction::push(REGISTER_MAP[STACK_REG]).emit(self)?;
+        X86Instruction::push(REGISTER_MAP[STACK_REG], None).emit(self)?;
 
         // Save pointer to optional typed return value
-        X86Instruction::push(ARGUMENT_REGISTERS[0]).emit(self)?;
+        X86Instruction::push(ARGUMENT_REGISTERS[0], None).emit(self)?;
 
         // Save initial value of instruction_meter.get_remaining()
-        emit_rust_call(self, I::get_remaining as *const u8, &[
+        emit_rust_call(self, Value::Constant64(I::get_remaining as *const u8 as i64, false), &[
             Argument { index: 0, value: Value::Register(ARGUMENT_REGISTERS[3]) },
         ], Some(ARGUMENT_REGISTERS[0]), false)?;
-        X86Instruction::push(ARGUMENT_REGISTERS[0]).emit(self)?;
+        X86Instruction::push(ARGUMENT_REGISTERS[0], None).emit(self)?;
 
         // Save instruction meter
-        X86Instruction::push(ARGUMENT_REGISTERS[3]).emit(self)?;
+        X86Instruction::push(ARGUMENT_REGISTERS[3], None).emit(self)?;
 
         // Initialize stop watch
         emit_alu(self, OperandSize::S64, 0x31, R11, R11, 0, None)?; // R11 ^= R11; 
-        X86Instruction::push(R11).emit(self)?;
-        X86Instruction::push(R11).emit(self)?;
+        X86Instruction::push(R11, None).emit(self)?;
+        X86Instruction::push(R11, None).emit(self)?;
 
         // Initialize frame pointer
         X86Instruction::mov(OperandSize::S64, RSP, RBP).emit(self)?;
@@ -1619,7 +1627,7 @@ impl JitCompiler {
             println!("Stop watch: {} / {} = {}", numerator, denominator, if denominator == 0 { 0.0 } else { numerator as f64 / denominator as f64 });
         }
         if self.stopwatch_is_active {
-            emit_rust_call(self, stopwatch_result as *const u8, &[
+            emit_rust_call(self, Value::Constant64(stopwatch_result as *const u8 as i64, false), &[
                 Argument { index: 1, value: Value::RegisterIndirect(RBP, slot_on_environment_stack(self, EnvironmentStackSlot::StopwatchDenominator), false) },
                 Argument { index: 0, value: Value::RegisterIndirect(RBP, slot_on_environment_stack(self, EnvironmentStackSlot::StopwatchNumerator), false) },
             ], None, false)?;
