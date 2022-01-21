@@ -21,7 +21,14 @@ use goblin::{
     elf::{header::*, reloc::*, section_header::*, Elf},
     error::Error as GoblinError,
 };
-use std::{collections::BTreeMap, fmt::Debug, mem, ops::Range, pin::Pin, str};
+use std::{
+    collections::{btree_map::Entry, BTreeMap},
+    fmt::Debug,
+    mem,
+    ops::Range,
+    pin::Pin,
+    str,
+};
 
 /// Error definitions
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
@@ -121,23 +128,31 @@ pub fn hash_bpf_function(pc: usize, name: &str) -> u32 {
 }
 
 /// Register a symbol or throw ElfError::SymbolHashCollision
-pub fn register_bpf_function(
+pub fn register_bpf_function<T: AsRef<str> + ToString>(
     bpf_functions: &mut BTreeMap<u32, (usize, String)>,
     pc: usize,
-    name: &str,
+    name: T,
     enable_symbol_and_section_labels: bool,
 ) -> Result<u32, ElfError> {
-    let hash = hash_bpf_function(pc, name);
-    let name = if enable_symbol_and_section_labels {
-        name.to_string()
-    } else {
-        String::default()
-    };
-    if let Some(entry) = bpf_functions.insert(hash, (pc, name)) {
-        if entry.0 != pc {
-            return Err(ElfError::SymbolHashCollision(hash));
+    let hash = hash_bpf_function(pc, name.as_ref());
+    match bpf_functions.entry(hash) {
+        Entry::Vacant(entry) => {
+            entry.insert((
+                pc,
+                if enable_symbol_and_section_labels {
+                    name.to_string()
+                } else {
+                    String::default()
+                },
+            ));
+        }
+        Entry::Occupied(entry) => {
+            if entry.get().0 != pc {
+                return Err(ElfError::SymbolHashCollision(hash));
+            }
         }
     }
+
     Ok(hash)
 }
 
@@ -557,11 +572,16 @@ impl<E: UserDefinedError, I: InstructionMeter> Executable<E, I> {
                         i.saturating_add(ebpf::ELF_INSN_DUMP_OFFSET),
                     ));
                 }
-                let name = format!("function_{}", target_pc);
+                let name = if enable_symbol_and_section_labels {
+                    format!("function_{}", target_pc)
+                } else {
+                    String::default()
+                };
+
                 let hash = register_bpf_function(
                     bpf_functions,
                     target_pc as usize,
-                    &name,
+                    name,
                     enable_symbol_and_section_labels,
                 )?;
                 insn.imm = hash as i64;
@@ -569,7 +589,7 @@ impl<E: UserDefinedError, I: InstructionMeter> Executable<E, I> {
                 let checked_slice = elf_bytes
                     .get_mut(offset..offset.saturating_add(ebpf::INSN_SIZE))
                     .ok_or(ElfError::ValueOutOfBounds)?;
-                checked_slice.copy_from_slice(&insn.to_vec());
+                checked_slice.copy_from_slice(&insn.to_array());
             }
         }
         Ok(())
@@ -1015,7 +1035,7 @@ mod test {
     #[test]
     fn test_fixup_relative_calls_back() {
         // call -2
-        let mut bpf_functions: BTreeMap<u32, (usize, String)> = BTreeMap::new();
+        let mut bpf_functions = BTreeMap::new();
         #[rustfmt::skip]
         let mut prog = vec![
             0xb7, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
@@ -1039,7 +1059,7 @@ mod test {
         assert_eq!(*bpf_functions.get(&hash).unwrap(), (4, name));
 
         // call +6
-        let mut bpf_functions: BTreeMap<u32, (usize, String)> = BTreeMap::new();
+        let mut bpf_functions = BTreeMap::new();
         prog.splice(44.., vec![0xfa, 0xff, 0xff, 0xff]);
         ElfExecutable::fixup_relative_calls(true, &mut bpf_functions, &mut prog).unwrap();
         let name = "function_0".to_string();
@@ -1058,7 +1078,7 @@ mod test {
     #[test]
     fn test_fixup_relative_calls_forward() {
         // call +0
-        let mut bpf_functions: BTreeMap<u32, (usize, String)> = BTreeMap::new();
+        let mut bpf_functions = BTreeMap::new();
         #[rustfmt::skip]
         let mut prog = vec![
             0x85, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
@@ -1082,7 +1102,7 @@ mod test {
         assert_eq!(*bpf_functions.get(&hash).unwrap(), (1, name));
 
         // call +4
-        let mut bpf_functions: BTreeMap<u32, (usize, String)> = BTreeMap::new();
+        let mut bpf_functions = BTreeMap::new();
         prog.splice(4..8, vec![0x04, 0x00, 0x00, 0x00]);
         ElfExecutable::fixup_relative_calls(true, &mut bpf_functions, &mut prog).unwrap();
         let name = "function_5".to_string();
@@ -1103,7 +1123,7 @@ mod test {
         expected = "called `Result::unwrap()` on an `Err` value: RelativeJumpOutOfBounds(29)"
     )]
     fn test_fixup_relative_calls_out_of_bounds_forward() {
-        let mut bpf_functions: BTreeMap<u32, (usize, String)> = BTreeMap::new();
+        let mut bpf_functions = BTreeMap::new();
         // call +5
         #[rustfmt::skip]
         let mut prog = vec![
@@ -1133,7 +1153,7 @@ mod test {
         expected = "called `Result::unwrap()` on an `Err` value: RelativeJumpOutOfBounds(34)"
     )]
     fn test_fixup_relative_calls_out_of_bounds_back() {
-        let mut bpf_functions: BTreeMap<u32, (usize, String)> = BTreeMap::new();
+        let mut bpf_functions = BTreeMap::new();
         // call -7
         #[rustfmt::skip]
         let mut prog = vec![

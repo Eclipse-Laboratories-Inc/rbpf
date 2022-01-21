@@ -266,7 +266,7 @@ pub fn assemble<E: UserDefinedError, I: 'static + InstructionMeter>(
         }
     }
     insn_ptr = 0;
-    let mut bpf_functions: BTreeMap<u32, (usize, String)> = BTreeMap::new();
+    let mut bpf_functions = BTreeMap::new();
     resolve_call(&mut bpf_functions, &labels, "entrypoint", None)?;
     let mut instructions: Vec<Insn> = Vec::new();
     for statement in statements.iter() {
