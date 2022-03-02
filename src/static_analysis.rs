@@ -839,9 +839,6 @@ impl<'a, E: UserDefinedError, I: InstructionMeter> Analysis<'a, E, I> {
                         self.control_flow_graph_dominance_intersect(*p, dominator_parent)
                     };
                 }
-                if dominator_parent == usize::MAX {
-                    dominator_parent = *b;
-                }
                 if cfg_node.dominator_parent != dominator_parent {
                     let mut cfg_node = self.cfg_nodes.get_mut(b).unwrap();
                     cfg_node.dominator_parent = dominator_parent;
@@ -854,6 +851,7 @@ impl<'a, E: UserDefinedError, I: InstructionMeter> Analysis<'a, E, I> {
         }
         for b in self.topological_order.iter() {
             let cfg_node = &self.cfg_nodes[b];
+            assert_ne!(cfg_node.dominator_parent, usize::MAX);
             if *b == cfg_node.dominator_parent {
                 continue;
             }
