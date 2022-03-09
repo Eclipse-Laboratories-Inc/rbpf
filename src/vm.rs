@@ -211,6 +211,8 @@ pub struct Config {
     pub encrypt_environment_registers: bool,
     /// Disable ldabs* and ldind* instructions
     pub disable_deprecated_load_instructions: bool,
+    /// Throw ElfError::SymbolHashCollision when a BPF function collides with a registered syscall
+    pub syscall_bpf_function_hash_collision: bool,
 }
 
 impl Default for Config {
@@ -225,10 +227,11 @@ impl Default for Config {
             enable_symbol_and_section_labels: false,
             disable_unresolved_symbols_at_runtime: true,
             reject_broken_elfs: false,
-            disable_deprecated_load_instructions: true,
             noop_instruction_ratio: 1.0 / 256.0,
             sanitize_user_provided_values: true,
             encrypt_environment_registers: true,
+            disable_deprecated_load_instructions: true,
+            syscall_bpf_function_hash_collision: true,
         }
     }
 }
@@ -441,9 +444,11 @@ macro_rules! translate_memory_access {
 /// ];
 ///
 /// // Instantiate a VM.
+/// let config = Config::default();
 /// let mut bpf_functions = std::collections::BTreeMap::new();
-/// register_bpf_function(&mut bpf_functions, 0, "entrypoint", false).unwrap();
-/// let mut executable = Executable::<UserError, TestInstructionMeter>::from_text_bytes(prog, None, Config::default(), SyscallRegistry::default(), bpf_functions).unwrap();
+/// let syscall_registry = SyscallRegistry::default();
+/// register_bpf_function(&config, &mut bpf_functions, &syscall_registry, 0, "entrypoint").unwrap();
+/// let mut executable = Executable::<UserError, TestInstructionMeter>::from_text_bytes(prog, None, config, syscall_registry, bpf_functions).unwrap();
 /// let mut vm = EbpfVm::<UserError, TestInstructionMeter>::new(&executable, &mut [], mem).unwrap();
 ///
 /// // Provide a reference to the packet data.
@@ -477,9 +482,11 @@ impl<'a, E: UserDefinedError, I: InstructionMeter> EbpfVm<'a, E, I> {
     /// ];
     ///
     /// // Instantiate a VM.
+    /// let config = Config::default();
     /// let mut bpf_functions = std::collections::BTreeMap::new();
-    /// register_bpf_function(&mut bpf_functions, 0, "entrypoint", false).unwrap();
-    /// let mut executable = Executable::<UserError, TestInstructionMeter>::from_text_bytes(prog, None, Config::default(), SyscallRegistry::default(), bpf_functions).unwrap();
+    /// let syscall_registry = SyscallRegistry::default();
+    /// register_bpf_function(&config, &mut bpf_functions, &syscall_registry, 0, "entrypoint").unwrap();
+    /// let mut executable = Executable::<UserError, TestInstructionMeter>::from_text_bytes(prog, None, config, syscall_registry, bpf_functions).unwrap();
     /// let mut vm = EbpfVm::<UserError, TestInstructionMeter>::new(&executable, &mut [], &mut []).unwrap();
     /// ```
     pub fn new(
@@ -567,9 +574,10 @@ impl<'a, E: UserDefinedError, I: InstructionMeter> EbpfVm<'a, E, I> {
     /// let mut syscall_registry = SyscallRegistry::default();
     /// syscall_registry.register_syscall_by_hash(6, BpfTracePrintf::call).unwrap();
     /// // Instantiate an Executable and VM
+    /// let config = Config::default();
     /// let mut bpf_functions = std::collections::BTreeMap::new();
-    /// register_bpf_function(&mut bpf_functions, 0, "entrypoint", false).unwrap();
-    /// let mut executable = Executable::<UserError, TestInstructionMeter>::from_text_bytes(prog, None, Config::default(), syscall_registry, bpf_functions).unwrap();
+    /// register_bpf_function(&config, &mut bpf_functions, &syscall_registry, 0, "entrypoint").unwrap();
+    /// let mut executable = Executable::<UserError, TestInstructionMeter>::from_text_bytes(prog, None, config, syscall_registry, bpf_functions).unwrap();
     /// let mut vm = EbpfVm::<UserError, TestInstructionMeter>::new(&executable, &mut [], &mut []).unwrap();
     /// // Bind a context object instance to the previously registered syscall
     /// vm.bind_syscall_context_object(Box::new(BpfTracePrintf {}), None);
@@ -631,9 +639,11 @@ impl<'a, E: UserDefinedError, I: InstructionMeter> EbpfVm<'a, E, I> {
     /// ];
     ///
     /// // Instantiate a VM.
+    /// let config = Config::default();
     /// let mut bpf_functions = std::collections::BTreeMap::new();
-    /// register_bpf_function(&mut bpf_functions, 0, "entrypoint", false).unwrap();
-    /// let mut executable = Executable::<UserError, TestInstructionMeter>::from_text_bytes(prog, None, Config::default(), SyscallRegistry::default(), bpf_functions).unwrap();
+    /// let syscall_registry = SyscallRegistry::default();
+    /// register_bpf_function(&config, &mut bpf_functions, &syscall_registry, 0, "entrypoint").unwrap();
+    /// let mut executable = Executable::<UserError, TestInstructionMeter>::from_text_bytes(prog, None, config, syscall_registry, bpf_functions).unwrap();
     /// let mut vm = EbpfVm::<UserError, TestInstructionMeter>::new(&executable, &mut [], mem).unwrap();
     ///
     /// // Provide a reference to the packet data.
