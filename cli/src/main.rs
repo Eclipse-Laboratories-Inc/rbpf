@@ -1,8 +1,9 @@
 use clap::{crate_version, App, Arg};
 use solana_rbpf::{
     assembler::assemble,
+    ebpf,
     elf::Executable,
-    memory_region::MemoryMapping,
+    memory_region::{MemoryMapping, MemoryRegion},
     static_analysis::Analysis,
     syscalls::Result,
     user_error::UserError,
@@ -179,7 +180,8 @@ fn main() {
     if matches.value_of("use") == Some("jit") {
         Executable::<UserError, TestInstructionMeter>::jit_compile(&mut executable).unwrap();
     }
-    let mut vm = EbpfVm::new(&executable, &mut mem, &mut heap).unwrap();
+    let mem_region = MemoryRegion::new_writable(&mut mem, ebpf::MM_INPUT_START);
+    let mut vm = EbpfVm::new(&executable, &mut heap, vec![mem_region]).unwrap();
 
     let analysis = if matches.value_of("use") == Some("cfg")
         || matches.value_of("use") == Some("disassembler")

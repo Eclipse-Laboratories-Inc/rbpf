@@ -10,7 +10,9 @@ extern crate solana_rbpf;
 extern crate test;
 
 use solana_rbpf::{
+    ebpf,
     elf::Executable,
+    memory_region::MemoryRegion,
     user_error::UserError,
     vm::{Config, EbpfVm, SyscallRegistry, TestInstructionMeter},
 };
@@ -30,7 +32,7 @@ fn bench_init_interpreter_execution(bencher: &mut Bencher) {
     )
     .unwrap();
     let mut vm =
-        EbpfVm::<UserError, TestInstructionMeter>::new(&executable, &mut [], &mut []).unwrap();
+        EbpfVm::<UserError, TestInstructionMeter>::new(&executable, &mut [], Vec::new()).unwrap();
     bencher.iter(|| {
         vm.execute_program_interpreted(&mut TestInstructionMeter { remaining: 29 })
             .unwrap()
@@ -52,7 +54,7 @@ fn bench_init_jit_execution(bencher: &mut Bencher) {
     .unwrap();
     Executable::<UserError, TestInstructionMeter>::jit_compile(&mut executable).unwrap();
     let mut vm =
-        EbpfVm::<UserError, TestInstructionMeter>::new(&executable, &mut [], &mut []).unwrap();
+        EbpfVm::<UserError, TestInstructionMeter>::new(&executable, &mut [], Vec::new()).unwrap();
     bencher.iter(|| {
         vm.execute_program_jit(&mut TestInstructionMeter { remaining: 29 })
             .unwrap()
@@ -75,7 +77,8 @@ fn bench_jit_vs_interpreter(
     )
     .unwrap();
     Executable::<UserError, TestInstructionMeter>::jit_compile(&mut executable).unwrap();
-    let mut vm = EbpfVm::new(&executable, &mut [], mem).unwrap();
+    let mem_region = MemoryRegion::new_writable(mem, ebpf::MM_INPUT_START);
+    let mut vm = EbpfVm::new(&executable, &mut [], vec![mem_region]).unwrap();
     let interpreter_summary = bencher
         .bench(|bencher| {
             bencher.iter(|| {
