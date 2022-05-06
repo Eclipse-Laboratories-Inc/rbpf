@@ -24,7 +24,6 @@ use crate::{
     user_error::UserError,
     verifier::VerifierError,
 };
-use log::debug;
 use std::{
     collections::{BTreeMap, HashMap},
     fmt::Debug,
@@ -501,7 +500,6 @@ pub struct EbpfVm<'a, E: UserDefinedError, I: InstructionMeter> {
     syscall_context_objects: Vec<*mut u8>,
     syscall_context_object_pool: Vec<Box<dyn SyscallObject<E> + 'a>>,
     stack: CallFrames<'a>,
-    last_insn_count: u64,
     total_insn_count: u64,
 }
 
@@ -556,7 +554,6 @@ impl<'a, E: UserDefinedError, I: InstructionMeter> EbpfVm<'a, E, I> {
             ],
             syscall_context_object_pool: Vec::with_capacity(number_of_syscalls),
             stack,
-            last_insn_count: 0,
             total_insn_count: 0,
         };
         unsafe {
@@ -695,9 +692,14 @@ impl<'a, E: UserDefinedError, I: InstructionMeter> EbpfVm<'a, E, I> {
         } else {
             0
         };
-        let result = self.execute_program_interpreted_inner(instruction_meter);
+        let mut last_insn_count = 0;
+        let result = self.execute_program_interpreted_inner(
+            instruction_meter,
+            initial_insn_count,
+            &mut last_insn_count,
+        );
         if self.executable.get_config().enable_instruction_meter {
-            instruction_meter.consume(self.last_insn_count);
+            instruction_meter.consume(last_insn_count);
             self.total_insn_count = initial_insn_count - instruction_meter.get_remaining();
         }
         result
@@ -707,49 +709,35 @@ impl<'a, E: UserDefinedError, I: InstructionMeter> EbpfVm<'a, E, I> {
     fn execute_program_interpreted_inner(
         &mut self,
         instruction_meter: &mut I,
+        initial_insn_count: u64,
+        last_insn_count: &mut u64,
     ) -> ProgramResult<E> {
-        const U32MAX: u64 = u32::MAX as u64;
-
         // R1 points to beginning of input memory, R10 to the stack of the first frame
         let mut reg: [u64; 11] = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, self.stack.get_frame_ptr()];
-
-        if self.memory_mapping.map::<UserError>(AccessType::Store, ebpf::MM_INPUT_START, 1).is_ok() {
-            reg[1] = ebpf::MM_INPUT_START;
-        }
-
-        // Check config outside of the instruction loop
-        let config = self.executable.get_config();
-        let instruction_meter_enabled = config.enable_instruction_meter;
-        let instruction_tracing_enabled = config.enable_instruction_tracing;
-        let dynamic_stack_frames = config.dynamic_stack_frames;
-        let static_syscalls = config.static_syscalls;
+        reg[1] = ebpf::MM_INPUT_START;
 
         // Loop on instructions
-        let entry = self.executable.get_entrypoint_instruction_offset()?;
-        let mut next_pc: usize = entry;
-        let mut remaining_insn_count = if instruction_meter_enabled { instruction_meter.get_remaining() } else { 0 };
-        let initial_insn_count = remaining_insn_count;
-        self.last_insn_count = 0;
-        let mut total_insn_count = 0;
+        let config = self.executable.get_config();
+        let mut next_pc: usize = self.executable.get_entrypoint_instruction_offset()?;
+        let mut remaining_insn_count = initial_insn_count;
         while (next_pc + 1) * ebpf::INSN_SIZE <= self.program.len() {
+            *last_insn_count += 1;
             let pc = next_pc;
             next_pc += 1;
             let mut instruction_width = 1;
             let mut insn = ebpf::get_insn_unchecked(self.program, pc);
             let dst = insn.dst as usize;
             let src = insn.src as usize;
-            self.last_insn_count += 1;
 
-            if instruction_tracing_enabled {
+            if config.enable_instruction_tracing {
                 let mut state = [0u64; 12];
                 state[0..11].copy_from_slice(&reg);
                 state[11] = pc as u64;
                 self.tracer.trace(state);
             }
 
-
             match insn.opc {
-                _ if dst == STACK_PTR_REG && dynamic_stack_frames => {
+                _ if dst == STACK_PTR_REG && config.dynamic_stack_frames => {
                     match insn.opc {
                         ebpf::SUB64_IMM => self.stack.resize_stack(-insn.imm),
                         ebpf::ADD64_IMM => self.stack.resize_stack(insn.imm),
@@ -914,7 +902,7 @@ impl<'a, E: UserDefinedError, I: InstructionMeter> EbpfVm<'a, E, I> {
                 ebpf::LSH32_REG  =>   reg[dst] = (reg[dst] as u32).wrapping_shl(reg[src] as u32) as u64,
                 ebpf::RSH32_IMM  =>   reg[dst] = (reg[dst] as u32).wrapping_shr(insn.imm as u32) as u64,
                 ebpf::RSH32_REG  =>   reg[dst] = (reg[dst] as u32).wrapping_shr(reg[src] as u32) as u64,
-                ebpf::NEG32      => { reg[dst] = (reg[dst] as i32).wrapping_neg()                as u64; reg[dst] &= U32MAX; },
+                ebpf::NEG32      => { reg[dst] = (reg[dst] as i32).wrapping_neg()                as u64; reg[dst] &= u32::MAX as u64; },
                 ebpf::MOD32_IMM  =>   reg[dst] = (reg[dst] as u32             % insn.imm as u32) as u64,
                 ebpf::MOD32_REG  => {
                     if reg[src] as u32 == 0 {
@@ -926,8 +914,8 @@ impl<'a, E: UserDefinedError, I: InstructionMeter> EbpfVm<'a, E, I> {
                 ebpf::XOR32_REG  =>   reg[dst] = (reg[dst] as u32            ^ reg[src]  as u32) as u64,
                 ebpf::MOV32_IMM  =>   reg[dst] = insn.imm  as u32                                as u64,
                 ebpf::MOV32_REG  =>   reg[dst] = (reg[src] as u32)                               as u64,
-                ebpf::ARSH32_IMM => { reg[dst] = (reg[dst] as i32).wrapping_shr(insn.imm as u32) as u64; reg[dst] &= U32MAX; },
-                ebpf::ARSH32_REG => { reg[dst] = (reg[dst] as i32).wrapping_shr(reg[src] as u32) as u64; reg[dst] &= U32MAX; },
+                ebpf::ARSH32_IMM => { reg[dst] = (reg[dst] as i32).wrapping_shr(insn.imm as u32) as u64; reg[dst] &= u32::MAX as u64; },
+                ebpf::ARSH32_REG => { reg[dst] = (reg[dst] as i32).wrapping_shr(reg[src] as u32) as u64; reg[dst] &= u32::MAX as u64; },
                 ebpf::LE         => {
                     reg[dst] = match insn.imm {
                         16 => (reg[dst] as u16).to_le() as u64,
@@ -1041,7 +1029,7 @@ impl<'a, E: UserDefinedError, I: InstructionMeter> EbpfVm<'a, E, I> {
                 // changed after the program has been verified.
                 ebpf::CALL_IMM => {
                     let mut resolved = false;
-                    let (syscalls, calls) = if static_syscalls {
+                    let (syscalls, calls) = if config.static_syscalls {
                         (insn.src == 0, insn.src != 0)
                     } else {
                         (true, true)
@@ -1051,11 +1039,10 @@ impl<'a, E: UserDefinedError, I: InstructionMeter> EbpfVm<'a, E, I> {
                         if let Some(syscall) = self.executable.get_syscall_registry().lookup_syscall(insn.imm as u32) {
                             resolved = true;
 
-                            if instruction_meter_enabled {
-                                let _ = instruction_meter.consume(self.last_insn_count);
+                            if config.enable_instruction_meter {
+                                let _ = instruction_meter.consume(*last_insn_count);
                             }
-                            total_insn_count += self.last_insn_count;
-                            self.last_insn_count = 0;
+                            *last_insn_count = 0;
                             let mut result: ProgramResult<E> = Ok(0);
                             (unsafe { std::mem::transmute::<u64, SyscallFunction::<E, *mut u8>>(syscall.function) })(
                                 self.syscall_context_objects[SYSCALL_CONTEXT_OBJECTS_OFFSET + syscall.context_object_slot],
@@ -1068,7 +1055,7 @@ impl<'a, E: UserDefinedError, I: InstructionMeter> EbpfVm<'a, E, I> {
                                 &mut result,
                             );
                             reg[0] = result?;
-                            if instruction_meter_enabled {
+                            if config.enable_instruction_meter {
                                 remaining_insn_count = instruction_meter.get_remaining();
                             }
                         }
@@ -1105,11 +1092,6 @@ impl<'a, E: UserDefinedError, I: InstructionMeter> EbpfVm<'a, E, I> {
                             next_pc = self.check_pc(pc, ptr)?;
                         }
                         _ => {
-                            debug!("BPF instructions executed (interp): {:?}", total_insn_count + self.last_insn_count);
-                            debug!(
-                                "Max frame depth reached: {:?}",
-                                self.stack.get_max_frame_index()
-                            );
                             return Ok(reg[0]);
                         }
                     }
@@ -1117,7 +1099,7 @@ impl<'a, E: UserDefinedError, I: InstructionMeter> EbpfVm<'a, E, I> {
                 _ => return Err(EbpfError::UnsupportedInstruction(pc + ebpf::ELF_INSN_DUMP_OFFSET)),
             }
 
-            if instruction_meter_enabled && self.last_insn_count >= remaining_insn_count {
+            if config.enable_instruction_meter && *last_insn_count >= remaining_insn_count {
                 // Use `pc + instruction_width` instead of `next_pc` here because jumps and calls don't continue at the end of this instruction
                 return Err(EbpfError::ExceededMaxInstructions(pc + instruction_width + ebpf::ELF_INSN_DUMP_OFFSET, initial_insn_count));
             }
@@ -1154,15 +1136,6 @@ impl<'a, E: UserDefinedError, I: InstructionMeter> EbpfVm<'a, E, I> {
     /// the program works with the interpreter before running the JIT-compiled version of it.
     ///
     pub fn execute_program_jit(&mut self, instruction_meter: &mut I) -> ProgramResult<E> {
-        let reg1 = if self
-            .memory_mapping
-            .map::<UserError>(AccessType::Store, ebpf::MM_INPUT_START, 1)
-            .is_ok()
-        {
-            ebpf::MM_INPUT_START
-        } else {
-            0
-        };
         let initial_insn_count = if self.executable.get_config().enable_instruction_meter {
             instruction_meter.get_remaining()
         } else {
@@ -1173,22 +1146,24 @@ impl<'a, E: UserDefinedError, I: InstructionMeter> EbpfVm<'a, E, I> {
             .executable
             .get_compiled_program()
             .ok_or(EbpfError::JitNotCompiled)?;
-        unsafe {
+        let instruction_meter_final = unsafe {
             self.syscall_context_objects[SYSCALL_CONTEXT_OBJECTS_OFFSET - 1] =
                 &mut self.tracer as *mut _ as *mut u8;
-            self.last_insn_count = (compiled_program.main)(
+            (compiled_program.main)(
                 &result,
-                reg1,
+                ebpf::MM_INPUT_START,
                 &*(self.syscall_context_objects.as_ptr() as *const JitProgramArgument),
                 instruction_meter,
             )
-            .max(0) as u64;
-        }
+            .max(0) as u64
+        };
         if self.executable.get_config().enable_instruction_meter {
             let remaining_insn_count = instruction_meter.get_remaining();
-            self.total_insn_count = remaining_insn_count - self.last_insn_count;
-            instruction_meter.consume(self.total_insn_count);
-            self.total_insn_count += initial_insn_count - remaining_insn_count;
+            let last_insn_count = remaining_insn_count - instruction_meter_final;
+            instruction_meter.consume(last_insn_count);
+            self.total_insn_count = initial_insn_count + last_insn_count - remaining_insn_count;
+            // Same as:
+            // self.total_insn_count = initial_insn_count - instruction_meter.get_remaining();
         }
         match result {
             Err(EbpfError::ExceededMaxInstructions(pc, _)) => {
