@@ -47,7 +47,7 @@ pub struct JitProgramArgument<'a> {
 
 struct JitProgramSections {
     page_size: usize,
-    pc_section: &'static mut [u64],
+    pc_section: &'static mut [*const u8],
     text_section: &'static mut [u8],
 }
 
@@ -101,7 +101,7 @@ impl JitProgramSections {
             libc_error_guard!(mmap, &mut raw, pc_loc_table_size + over_allocated_code_size, libc::PROT_READ | libc::PROT_WRITE, libc::MAP_ANONYMOUS | libc::MAP_PRIVATE, 0, 0);
             Ok(Self {
                 page_size,
-                pc_section: std::slice::from_raw_parts_mut(raw as *mut u64, pc),
+                pc_section: std::slice::from_raw_parts_mut(raw as *mut *const u8, pc),
                 text_section: std::slice::from_raw_parts_mut(raw.add(pc_loc_table_size) as *mut u8, over_allocated_code_size),
             })
         }
@@ -237,9 +237,9 @@ pub fn emit<T, E: UserDefinedError>(jit: &mut JitCompiler, data: T) -> Result<()
         return Err(EbpfError::ExhausedTextSegment(jit.pc));
     }
     unsafe {
+        let ptr = jit.result.text_section.as_ptr().add(jit.offset_in_text_section);
         #[allow(clippy::cast_ptr_alignment)]
-        let ptr = jit.result.text_section.as_ptr().add(jit.offset_in_text_section) as *mut T;
-        *ptr = data as T;
+        ptr::write_unaligned(ptr as *mut T, data as T);
     }
     jit.offset_in_text_section += size;
     Ok(())
@@ -365,17 +365,18 @@ fn emit_sanitized_alu<E: UserDefinedError>(jit: &mut JitCompiler, size: OperandS
 
 #[inline]
 fn emit_jump_offset<E: UserDefinedError>(jit: &mut JitCompiler, target_pc: usize) -> Result<(), EbpfError<E>> {
-    let target_offset = if target_pc >= TARGET_PC_EPILOGUE {
-        jit.anchors[target_pc - TARGET_PC_EPILOGUE] as u32
-    } else if jit.result.pc_section[target_pc] != 0 {
-        jit.result.pc_section[target_pc] as u32
+    let location = unsafe { jit.result.text_section.as_ptr().add(jit.offset_in_text_section) };
+    let destination = if target_pc >= TARGET_PC_EPILOGUE {
+        jit.anchors[target_pc - TARGET_PC_EPILOGUE]
+    } else if !jit.result.pc_section[target_pc].is_null() {
+        jit.result.pc_section[target_pc]
     } else {
-        jit.text_section_jumps.push(Jump { location: jit.offset_in_text_section, target_pc });
+        jit.text_section_jumps.push(Jump { location, target_pc });
         return emit::<u32, E>(jit, 0);
     };
-    debug_assert_ne!(target_offset, 0);
-    let offset_value = target_offset as i32
-        - jit.offset_in_text_section as i32 // Relative jump
+    debug_assert!(!destination.is_null());
+    let offset_value = 
+        unsafe { destination.offset_from(location) } as i32 // Relative jump
         - mem::size_of::<i32>() as i32; // Jump from end of instruction
     emit::<u32, E>(jit, offset_value as u32)
 }
@@ -401,7 +402,7 @@ fn emit_call<E: UserDefinedError>(jit: &mut JitCompiler, target_pc: usize) -> Re
 
 fn set_anchor(jit: &mut JitCompiler, target: usize) {
     debug_assert!(target >= TARGET_PC_EPILOGUE);
-    jit.anchors[target - TARGET_PC_EPILOGUE] = jit.offset_in_text_section as u64;
+    jit.anchors[target - TARGET_PC_EPILOGUE] = unsafe { jit.result.text_section.as_ptr().add(jit.offset_in_text_section) };
 }
 
 /// Indices of slots inside the struct at inital RSP
@@ -929,7 +930,7 @@ fn emit_set_exception_kind<E: UserDefinedError>(jit: &mut JitCompiler, err: Ebpf
 
 #[derive(Debug)]
 struct Jump {
-    location: usize,
+    location: *const u8,
     target_pc: usize,
 }
 
@@ -940,7 +941,7 @@ pub struct JitCompiler {
     pc: usize,
     last_instruction_meter_validation_pc: usize,
     program_vm_addr: u64,
-    anchors: [u64; std::usize::MAX - TARGET_PC_EPILOGUE],
+    anchors: [*const u8; std::usize::MAX - TARGET_PC_EPILOGUE],
     pub(crate) config: Config,
     pub(crate) diversification_rng: SmallRng,
     stopwatch_is_active: bool,
@@ -1025,7 +1026,7 @@ impl JitCompiler {
             pc: 0,
             last_instruction_meter_validation_pc: 0,
             program_vm_addr: 0,
-            anchors: [0; std::usize::MAX - TARGET_PC_EPILOGUE],
+            anchors: [std::ptr::null(); std::usize::MAX - TARGET_PC_EPILOGUE],
             config: *config,
             diversification_rng,
             stopwatch_is_active: false,
@@ -1036,6 +1037,7 @@ impl JitCompiler {
 
     fn compile<E: UserDefinedError, I: InstructionMeter>(&mut self,
             executable: &Pin<Box<Executable<E, I>>>) -> Result<(), EbpfError<E>> {
+        let text_section_base = self.result.text_section.as_ptr();
         let (program_vm_addr, program) = executable.get_text_bytes();
         self.program_vm_addr = program_vm_addr;
 
@@ -1047,7 +1049,7 @@ impl JitCompiler {
         while self.pc * ebpf::INSN_SIZE < program.len() {
             let mut insn = ebpf::get_insn_unchecked(program, self.pc);
 
-            self.result.pc_section[self.pc] = self.offset_in_text_section as u64;
+            self.result.pc_section[self.pc] = unsafe { text_section_base.add(self.offset_in_text_section) };
 
             // Regular instruction meter checkpoints to prevent long linear runs from exceeding their budget
             if self.last_instruction_meter_validation_pc + self.config.instruction_meter_checkpoint_distance <= self.pc {
@@ -1391,7 +1393,8 @@ impl JitCompiler {
 
             self.pc += 1;
         }
-        self.result.pc_section[self.pc] = self.offset_in_text_section as u64; // Bumper so that the linear search of TARGET_PC_TRANSLATE_PC can not run off
+        // Bumper so that the linear search of TARGET_PC_TRANSLATE_PC can not run off
+        self.result.pc_section[self.pc] = unsafe { text_section_base.add(self.offset_in_text_section) };
 
         // Bumper in case there was no final exit
         emit_validate_and_profile_instruction_count(self, true, Some(self.pc + 2))?;
@@ -1796,27 +1799,21 @@ impl JitCompiler {
     }
 
     fn resolve_jumps(&mut self) {
-        // Resolve forward jumps
+        // Relocate forward jumps
         for jump in &self.text_section_jumps {
-            let offset_value = self.result.pc_section[jump.target_pc] as i32
-                - jump.location as i32 // Relative jump
+            let destination = self.result.pc_section[jump.target_pc];
+            let offset_value = 
+                unsafe { destination.offset_from(jump.location) } as i32 // Relative jump
                 - mem::size_of::<i32>() as i32; // Jump from end of instruction
-            unsafe {
-                ptr::write_unaligned(
-                    self.result.text_section.as_ptr().add(jump.location) as *mut i32,
-                    offset_value,
-                );
-            }
+            unsafe { ptr::write_unaligned(jump.location as *mut i32, offset_value); }
         }
+        // There is no `VerifierError::JumpToMiddleOfLDDW` for `call imm` so patch it here
         let call_unsupported_instruction = self.anchors[TARGET_PC_CALL_UNSUPPORTED_INSTRUCTION - TARGET_PC_EPILOGUE];
         let callx_unsupported_instruction = self.anchors[TARGET_PC_CALLX_UNSUPPORTED_INSTRUCTION - TARGET_PC_EPILOGUE];
         for offset in self.result.pc_section.iter_mut() {
-            // Turns compiletime exception handlers to runtime ones (as they need to turn the host PC back into a BPF PC)
             if *offset == call_unsupported_instruction {
                 *offset = callx_unsupported_instruction;
             }
-            // Shift offsets in pc_section to actual memory locations
-            *offset = unsafe { (self.result.text_section.as_ptr() as *const u8).add(*offset as usize) } as u64;
         }
     }
 }
