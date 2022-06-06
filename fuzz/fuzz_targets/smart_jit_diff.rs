@@ -11,9 +11,10 @@ use solana_rbpf::{
     insn_builder::{Arch, Instruction, IntoBytes},
     memory_region::MemoryRegion,
     user_error::UserError,
-    verifier::check,
-    vm::{EbpfVm, SyscallRegistry, TestInstructionMeter},
+    verifier::{RequisiteVerifier, Verifier},
+    vm::{EbpfVm, SyscallRegistry, TestInstructionMeter, VerifiedExecutable},
 };
+use test_utils::TautologyVerifier;
 
 use crate::common::ConfigTemplate;
 
@@ -40,7 +41,7 @@ fuzz_target!(|data: FuzzData| {
         .set_imm(data.exit_imm)
         .push();
     let config = data.template.into();
-    if check(prog.into_bytes(), &config).is_err() {
+    if RequisiteVerifier::verify(prog.into_bytes(), &config).is_err() {
         // verify please
         return;
     }
@@ -49,23 +50,24 @@ fuzz_target!(|data: FuzzData| {
     let registry = SyscallRegistry::default();
     let mut bpf_functions = BTreeMap::new();
     register_bpf_function(&config, &mut bpf_functions, &registry, 0, "entrypoint").unwrap();
-    let mut executable = Executable::<UserError, TestInstructionMeter>::from_text_bytes(
+    let executable = Executable::<UserError, TestInstructionMeter>::from_text_bytes(
         prog.into_bytes(),
-        None,
         config,
         SyscallRegistry::default(),
         bpf_functions,
     )
     .unwrap();
-    if Executable::jit_compile(&mut executable).is_ok() {
+    let mut verified_executable =
+        VerifiedExecutable::<TautologyVerifier, UserError, TestInstructionMeter>::from_executable(
+            executable,
+        )
+        .unwrap();
+    if verified_executable.jit_compile().is_ok() {
         let interp_mem_region = MemoryRegion::new_writable(&mut interp_mem, ebpf::MM_INPUT_START);
         let mut interp_vm =
-            EbpfVm::<UserError, TestInstructionMeter>::new(&executable, &mut [], vec![interp_mem_region])
-                .unwrap();
+            EbpfVm::new(&verified_executable, &mut [], vec![interp_mem_region]).unwrap();
         let jit_mem_region = MemoryRegion::new_writable(&mut jit_mem, ebpf::MM_INPUT_START);
-        let mut jit_vm =
-            EbpfVm::<UserError, TestInstructionMeter>::new(&executable, &mut [], vec![jit_mem_region])
-                .unwrap();
+        let mut jit_vm = EbpfVm::new(&verified_executable, &mut [], vec![jit_mem_region]).unwrap();
 
         let mut interp_meter = TestInstructionMeter { remaining: 1 << 16 };
         let interp_res = interp_vm.execute_program_interpreted(&mut interp_meter);

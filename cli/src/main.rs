@@ -7,8 +7,11 @@ use solana_rbpf::{
     static_analysis::Analysis,
     syscalls::Result,
     user_error::UserError,
-    verifier::check,
-    vm::{Config, DynamicAnalysis, EbpfVm, SyscallObject, SyscallRegistry, TestInstructionMeter},
+    verifier::RequisiteVerifier,
+    vm::{
+        Config, DynamicAnalysis, EbpfVm, SyscallObject, SyscallRegistry, TestInstructionMeter,
+        VerifiedExecutable,
+    },
 };
 use std::{fs::File, io::Read, path::Path};
 
@@ -106,12 +109,6 @@ fn main() {
                 .short('p')
                 .long("prof"),
         )
-        .arg(
-            Arg::new("verify")
-                .about("Run the verifier before execution or disassembly")
-                .short('v')
-                .long("veri"),
-        )
         .get_matches();
 
     let config = Config {
@@ -119,21 +116,14 @@ fn main() {
         enable_symbol_and_section_labels: true,
         ..Config::default()
     };
-    let verifier: Option<for<'r> fn(&'r [u8], &Config) -> std::result::Result<_, _>> =
-        if matches.is_present("verify") {
-            Some(check)
-        } else {
-            None
-        };
     let syscall_registry = SyscallRegistry::default();
-    let mut executable = match matches.value_of("assembler") {
+    let executable = match matches.value_of("assembler") {
         Some(asm_file_name) => {
             let mut file = File::open(&Path::new(asm_file_name)).unwrap();
             let mut source = Vec::new();
             file.read_to_end(&mut source).unwrap();
             assemble::<UserError, TestInstructionMeter>(
                 std::str::from_utf8(source.as_slice()).unwrap(),
-                verifier,
                 config,
                 syscall_registry,
             )
@@ -142,16 +132,17 @@ fn main() {
             let mut file = File::open(&Path::new(matches.value_of("elf").unwrap())).unwrap();
             let mut elf = Vec::new();
             file.read_to_end(&mut elf).unwrap();
-            Executable::<UserError, TestInstructionMeter>::from_elf(
-                &elf,
-                verifier,
-                config,
-                syscall_registry,
-            )
-            .map_err(|err| format!("Executable constructor failed: {:?}", err))
+            Executable::<UserError, TestInstructionMeter>::from_elf(&elf, config, syscall_registry)
+                .map_err(|err| format!("Executable constructor failed: {:?}", err))
         }
     }
     .unwrap();
+
+    let mut verified_executable =
+        VerifiedExecutable::<RequisiteVerifier, UserError, TestInstructionMeter>::from_executable(
+            executable,
+        )
+        .unwrap();
 
     let mut mem = match matches.value_of("input").unwrap().parse::<usize>() {
         Ok(allocate) => vec![0u8; allocate],
@@ -178,17 +169,17 @@ fn main() {
             .unwrap()
     ];
     if matches.value_of("use") == Some("jit") {
-        Executable::<UserError, TestInstructionMeter>::jit_compile(&mut executable).unwrap();
+        verified_executable.jit_compile().unwrap();
     }
     let mem_region = MemoryRegion::new_writable(&mut mem, ebpf::MM_INPUT_START);
-    let mut vm = EbpfVm::new(&executable, &mut heap, vec![mem_region]).unwrap();
+    let mut vm = EbpfVm::new(&verified_executable, &mut heap, vec![mem_region]).unwrap();
 
     let analysis = if matches.value_of("use") == Some("cfg")
         || matches.value_of("use") == Some("disassembler")
         || matches.is_present("trace")
         || matches.is_present("profile")
     {
-        Some(Analysis::from_executable(&executable).unwrap())
+        Some(Analysis::from_executable(verified_executable.get_executable()).unwrap())
     } else {
         None
     };

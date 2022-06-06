@@ -13,9 +13,10 @@ use solana_rbpf::{
     insn_builder::{Arch, IntoBytes},
     memory_region::MemoryRegion,
     user_error::UserError,
-    verifier::check,
-    vm::{EbpfVm, SyscallRegistry, TestInstructionMeter},
+    verifier::{RequisiteVerifier, Verifier},
+    vm::{EbpfVm, SyscallRegistry, TestInstructionMeter, VerifiedExecutable},
 };
+use test_utils::TautologyVerifier;
 
 use crate::common::ConfigTemplate;
 
@@ -33,7 +34,7 @@ struct FuzzData {
 fuzz_target!(|data: FuzzData| {
     let prog = make_program(&data.prog, data.arch);
     let config = data.template.into();
-    if check(prog.into_bytes(), &config).is_err() {
+    if RequisiteVerifier::verify(prog.into_bytes(), &config).is_err() {
         // verify please
         return;
     }
@@ -43,15 +44,18 @@ fuzz_target!(|data: FuzzData| {
     register_bpf_function(&config, &mut bpf_functions, &registry, 0, "entrypoint").unwrap();
     let executable = Executable::<UserError, TestInstructionMeter>::from_text_bytes(
         prog.into_bytes(),
-        None,
         config,
         SyscallRegistry::default(),
         bpf_functions,
     )
     .unwrap();
+    let verified_executable =
+        VerifiedExecutable::<TautologyVerifier, UserError, TestInstructionMeter>::from_executable(
+            executable,
+        )
+        .unwrap();
     let mem_region = MemoryRegion::new_writable(&mut mem, ebpf::MM_INPUT_START);
-    let mut vm =
-        EbpfVm::<UserError, TestInstructionMeter>::new(&executable, &mut [], vec![mem_region]).unwrap();
+    let mut vm = EbpfVm::new(&verified_executable, &mut [], vec![mem_region]).unwrap();
 
     drop(black_box(vm.execute_program_interpreted(
         &mut TestInstructionMeter { remaining: 1 << 16 },
