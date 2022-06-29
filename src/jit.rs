@@ -1015,39 +1015,6 @@ impl JitCompiler {
                         }
                     }
                 }
-                // BPF_LD class
-                ebpf::LD_ABS_B   => {
-                    emit_address_translation(self, R11, Value::Constant64(ebpf::MM_INPUT_START.wrapping_add(insn.imm as u32 as u64) as i64, true), 1, AccessType::Load);
-                    emit_ins(self, X86Instruction::load(OperandSize::S8, R11, RAX, X86IndirectAccess::Offset(0)));
-                },
-                ebpf::LD_ABS_H   => {
-                    emit_address_translation(self, R11, Value::Constant64(ebpf::MM_INPUT_START.wrapping_add(insn.imm as u32 as u64) as i64, true), 2, AccessType::Load);
-                    emit_ins(self, X86Instruction::load(OperandSize::S16, R11, RAX, X86IndirectAccess::Offset(0)));
-                },
-                ebpf::LD_ABS_W   => {
-                    emit_address_translation(self, R11, Value::Constant64(ebpf::MM_INPUT_START.wrapping_add(insn.imm as u32 as u64) as i64, true), 4, AccessType::Load);
-                    emit_ins(self, X86Instruction::load(OperandSize::S32, R11, RAX, X86IndirectAccess::Offset(0)));
-                },
-                ebpf::LD_ABS_DW  => {
-                    emit_address_translation(self, R11, Value::Constant64(ebpf::MM_INPUT_START.wrapping_add(insn.imm as u32 as u64) as i64, true), 8, AccessType::Load);
-                    emit_ins(self, X86Instruction::load(OperandSize::S64, R11, RAX, X86IndirectAccess::Offset(0)));
-                },
-                ebpf::LD_IND_B   => {
-                    emit_address_translation(self, R11, Value::RegisterPlusConstant64(src, ebpf::MM_INPUT_START.wrapping_add(insn.imm as u32 as u64) as i64, true), 1, AccessType::Load);
-                    emit_ins(self, X86Instruction::load(OperandSize::S8, R11, RAX, X86IndirectAccess::Offset(0)));
-                },
-                ebpf::LD_IND_H   => {
-                    emit_address_translation(self, R11, Value::RegisterPlusConstant64(src, ebpf::MM_INPUT_START.wrapping_add(insn.imm as u32 as u64) as i64, true), 2, AccessType::Load);
-                    emit_ins(self, X86Instruction::load(OperandSize::S16, R11, RAX, X86IndirectAccess::Offset(0)));
-                },
-                ebpf::LD_IND_W   => {
-                    emit_address_translation(self, R11, Value::RegisterPlusConstant64(src, ebpf::MM_INPUT_START.wrapping_add(insn.imm as u32 as u64) as i64, true), 4, AccessType::Load);
-                    emit_ins(self, X86Instruction::load(OperandSize::S32, R11, RAX, X86IndirectAccess::Offset(0)));
-                },
-                ebpf::LD_IND_DW  => {
-                    emit_address_translation(self, R11, Value::RegisterPlusConstant64(src, ebpf::MM_INPUT_START.wrapping_add(insn.imm as u32 as u64) as i64, true), 8, AccessType::Load);
-                    emit_ins(self, X86Instruction::load(OperandSize::S64, R11, RAX, X86IndirectAccess::Offset(0)));
-                },
 
                 ebpf::LD_DW_IMM  => {
                     emit_validate_and_profile_instruction_count(self, true, Some(self.pc + 2));
@@ -1285,21 +1252,8 @@ impl JitCompiler {
                     }
 
                     if !resolved {
-                        if self.config.disable_unresolved_symbols_at_runtime {
-                            emit_ins(self, X86Instruction::load_immediate(OperandSize::S64, R11, self.pc as i64));
-                            emit_ins(self, X86Instruction::jump_immediate(self.relative_to_anchor(ANCHOR_CALL_UNSUPPORTED_INSTRUCTION, 5)));
-                        } else {
-                            emit_validate_instruction_count(self, true, Some(self.pc));
-                            // executable.report_unresolved_symbol(self.pc)?;
-                            // Workaround for unresolved symbols in ELF: Report error at runtime instead of compile time
-                            emit_rust_call(self, Value::Constant64(Executable::<E, I>::report_unresolved_symbol as *const u8 as i64, false), &[
-                                Argument { index: 2, value: Value::Constant64(self.pc as i64, false) },
-                                Argument { index: 1, value: Value::Constant64(&*executable.as_ref() as *const _ as i64, false) },
-                                Argument { index: 0, value: Value::RegisterIndirect(RBP, slot_on_environment_stack(self, EnvironmentStackSlot::OptRetValPtr), false) },
-                            ], None, true);
-                            emit_ins(self, X86Instruction::load_immediate(OperandSize::S64, R11, self.pc as i64));
-                            emit_ins(self, X86Instruction::jump_immediate(self.relative_to_anchor(ANCHOR_RUST_EXCEPTION, 5)));
-                        }
+                        emit_ins(self, X86Instruction::load_immediate(OperandSize::S64, R11, self.pc as i64));
+                        emit_ins(self, X86Instruction::jump_immediate(self.relative_to_anchor(ANCHOR_CALL_UNSUPPORTED_INSTRUCTION, 5)));
                     }
                 },
                 ebpf::CALL_REG  => {

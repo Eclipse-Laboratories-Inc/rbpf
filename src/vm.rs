@@ -74,7 +74,7 @@ pub trait SyscallObject<E: UserDefinedError> {
 }
 
 /// Syscall function and binding slot for a context object
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Eq)]
 pub struct Syscall {
     /// Syscall init
     pub init: u64,
@@ -107,7 +107,7 @@ pub struct DynTraitFatPointer {
 }
 
 /// Holds the syscall function pointers of an Executable
-#[derive(Debug, PartialEq, Default)]
+#[derive(Debug, PartialEq, Eq, Default)]
 pub struct SyscallRegistry {
     /// Function pointers by symbol
     entries: HashMap<u32, Syscall>,
@@ -182,7 +182,7 @@ impl SyscallRegistry {
 }
 
 /// VM configuration settings
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Config {
     /// Maximum call depth
     pub max_call_depth: usize,
@@ -198,8 +198,6 @@ pub struct Config {
     pub enable_instruction_tracing: bool,
     /// Enable dynamic string allocation for labels
     pub enable_symbol_and_section_labels: bool,
-    /// Disable reporting of unresolved symbols at runtime
-    pub disable_unresolved_symbols_at_runtime: bool,
     /// Reject ELF files containing issues that the verifier did not catch before (up to v0.2.21)
     pub reject_broken_elfs: bool,
     /// Ratio of native host instructions per random no-op in JIT (0 = OFF)
@@ -208,8 +206,6 @@ pub struct Config {
     pub sanitize_user_provided_values: bool,
     /// Encrypt the environment registers in JIT
     pub encrypt_environment_registers: bool,
-    /// Disable ldabs* and ldind* instructions
-    pub disable_deprecated_load_instructions: bool,
     /// Throw ElfError::SymbolHashCollision when a BPF function collides with a registered syscall
     pub syscall_bpf_function_hash_collision: bool,
     /// Have the verifier reject "callx r10"
@@ -244,12 +240,10 @@ impl Default for Config {
             enable_instruction_meter: true,
             enable_instruction_tracing: false,
             enable_symbol_and_section_labels: false,
-            disable_unresolved_symbols_at_runtime: true,
             reject_broken_elfs: false,
             noop_instruction_rate: 256,
             sanitize_user_provided_values: true,
             encrypt_environment_registers: true,
-            disable_deprecated_load_instructions: true,
             syscall_bpf_function_hash_collision: true,
             reject_callx_r10: true,
             dynamic_stack_frames: true,
