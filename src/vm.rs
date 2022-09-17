@@ -229,6 +229,8 @@ pub struct Config {
     /// Ensure that rodata sections don't exceed their maximum allowed size and
     /// overlap with the stack
     pub reject_rodata_stack_overlap: bool,
+    /// Use aligned memory mapping
+    pub aligned_memory_mapping: bool,
 }
 
 impl Config {
@@ -261,6 +263,7 @@ impl Default for Config {
             enable_elf_vaddr: true,
             new_elf_parser: true,
             reject_rodata_stack_overlap: true,
+            aligned_memory_mapping: true,
         }
     }
 }
@@ -514,7 +517,6 @@ impl<'a, V: Verifier, E: UserDefinedError, I: InstructionMeter> EbpfVm<'a, V, E,
         let config = executable.get_config();
         let mut stack = CallFrames::new(config);
         let regions: Vec<MemoryRegion> = vec![
-            MemoryRegion::new_readonly(&[], 0),
             verified_executable.get_executable().get_ro_region(),
             stack.get_memory_region(),
             MemoryRegion::new_writable(heap_region, ebpf::MM_HEAP_START),
