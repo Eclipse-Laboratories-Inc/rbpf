@@ -48,6 +48,8 @@ pub mod verifier;
 pub mod vm;
 #[cfg(feature = "jit")]
 mod x86;
+mod compiler;
+mod riscv;
 
 trait ErrCheckedArithmetic: Sized {
     fn err_checked_add(self, other: Self) -> Result<Self, ArithmeticOverflow>;
