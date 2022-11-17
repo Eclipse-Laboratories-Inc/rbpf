@@ -132,6 +132,8 @@ const REGISTER_MAP: [[Register; 2]; 11] = [
     [CALLEE_SAVED_REGISTERS[9], CALLEE_SAVED_REGISTERS[10]],
 ];
 
+const REGISTER_ZERO: [Register; 2] = [Register::X0, Register::X0];
+
 const RSCRATCH: [Register; 2] = [CALLEE_SAVED_REGISTERS[11], CALLEE_SAVED_REGISTERS[12]];
 
 // Special registers:
@@ -480,13 +482,7 @@ impl Compiler {
                 emit_validate_instruction_count(self, true, Some(self.pc));
             }
 
-            if self.config.enable_instruction_tracing {
-                emit_load_immediate(self, OperandSize::S64, RSCRATCH, self.pc as i64);
-                emit_ins(self, RiscVInstruction::call_immediate(self.relative_to_anchor(ANCHOR_TRACE, 5)));
-                emit_load_immediate(self, OperandSize::S64, RSCRATCH, 0);
-            }
-
-            let dst = if insn.dst == STACK_PTR_REG as u8 { u8::MAX } else { REGISTER_MAP[insn.dst as usize] };
+            let dst = if insn.dst == STACK_PTR_REG as u8 { REGISTER_ZERO } else { REGISTER_MAP[insn.dst as usize] };
             let src = REGISTER_MAP[insn.src as usize];
             let target_pc = (self.pc as isize + insn.off as isize + 1) as usize;
 
@@ -508,11 +504,7 @@ impl Compiler {
                     self.pc += 1;
                     self.result.pc_section[self.pc] = self.anchors[ANCHOR_CALL_UNSUPPORTED_INSTRUCTION] as usize;
                     ebpf::augment_lddw_unchecked(program, &mut insn);
-                    if should_sanitize_constant(self, insn.imm) {
-                        emit_sanitized_load_immediate(self, OperandSize::S64, dst, insn.imm);
-                    } else {
-                        emit_load_immediate(self, OperandSize::S64, dst, insn.imm);
-                    }
+                    emit_load_immediate(self, OperandSize::S64, dst, insn.imm);
                 },
 
                 // BPF_LDX class
