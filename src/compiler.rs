@@ -132,8 +132,8 @@ const REGISTER_MAP: [[Register; 2]; 11] = [
     [CALLEE_SAVED_REGISTERS[9], CALLEE_SAVED_REGISTERS[10]],
 ];
 
-const REGISTER_ZERO: [Register; 2] = [Register::X0, Register::X0];
-
+const RENV: [Register; 2] = [Register::T6, Register::X0];
+const RZERO: [Register; 2] = [Register::X0, Register::X0];
 const RSCRATCH: [Register; 2] = [CALLEE_SAVED_REGISTERS[11], CALLEE_SAVED_REGISTERS[12]];
 
 // Special registers:
@@ -215,6 +215,11 @@ enum EnvironmentStackSlot {
     StopwatchDenominator = 13,
     /// Bumper for size_of
     SlotCount = 14,
+}
+
+#[inline]
+fn slot_on_environment_stack(comp: &Compiler, slot: EnvironmentStackSlot) -> i32 {
+    -8 * (slot as i32)
 }
 
 /* Explanation of the Instruction Meter
@@ -319,36 +324,142 @@ fn emit_profile_instruction_count_finalize(jit: &mut Compiler, store_pc_in_excep
 //    if store_pc_in_exception {
 //        emit_ins(jit, RiscVInstruction::load(OperandSize::S64, Register::T6, R10, X86IndirectAccess::Offset(slot_on_environment_stack(jit, EnvironmentStackSlot::OptRetValPtr))));
 //        if jit.err_kind_offset == 1 {
-//            emit_ins(jit, RiscVInstruction::store_immediate(OperandSize::S64, R10, X86IndirectAccess::Offset(0), 1)); // result.is_err = true;
+//            emit_store_immediate(jit, OperandSize::S64, R10, 1); // result.is_err = true;
 //        }
 //        emit_ins(jit, RiscVInstruction::alu(OperandSize::S64, 0x81, 0, RSCRATCH, ebpf::ELF_INSN_DUMP_OFFSET as i64 - 1, None));
 //        emit_ins(jit, RiscVInstruction::store(OperandSize::S64, RSCRATCH, R10, X86IndirectAccess::Offset((std::mem::size_of::<u64>() * (jit.err_kind_offset + 1)) as i32))); // result.pc = jit.pc + ebpf::ELF_INSN_DUMP_OFFSET;
 //    }
 }
 
+#[inline]
+fn emit_address_translation(comp: &mut Compiler, host_addr: Register, vm_addr: Value, len: u64, access_type: AccessType) {
+    match vm_addr {
+        Value::RegisterPlusConstant64(reg, constant, user_provided) => {
+            emit_load_immediate(comp, OperandSize::S64, RSCRATCH, constant);
+            emit_add(comp, OperandSize::S64, reg, RSCRATCH);
+        },
+        Value::Constant64(constant, user_provided) => {
+            emit_load_immediate(comp, OperandSize::S64, RSCRATCH, constant);
+        },
+        _ => {
+            #[cfg(debug_assertions)]
+            unreachable!();
+        },
+    }
+    let anchor = ANCHOR_TRANSLATE_MEMORY_ADDRESS + len.trailing_zeros() as usize + 4 * (access_type as usize);
+    emit_call(comp, comp.relative_to_anchor(anchor, 5));
+    emit_ins(comp, RiscVInstruction::mv(RSCRATCH[0], host_addr));
+}
+
+#[inline]
 fn emit_riscv_li(comp: &mut Compiler, dst: Register, imm: i32) {
     emit_ins(comp, RiscVInstruction::lui(dst, imm as i32));
     emit_ins(comp, RiscVInstruction::addi(dst, dst, imm));
 }
 
+#[inline]
+fn emit_riscv_push(comp: &mut Compiler, source: Register) {
+    emit_ins(comp, RiscVInstruction::addi(Register::SP, Register::SP, -4));
+    emit_ins(comp, RiscVInstruction::sw(Register::SP, source, 0));
+}
+
+#[inline]
+fn emit_riscv_pop(comp: &mut Compiler, dst: Register) {
+    emit_ins(comp, RiscVInstruction::lw(Register::SP, dst, 0));
+    emit_ins(comp, RiscVInstruction::addi(Register::SP, Register::SP, 4));
+}
+
+#[inline]
 fn emit_load_immediate(comp: &mut Compiler, size: OperandSize, dst: [Register; 2], imm: i64) {
-    emit_riscv_li(comp, dst[0], imm as i32);
+    match size {
+        OperandSize::S0  => emit_ins(comp, RiscVInstruction::lui(dst[0], 0)),
+        OperandSize::S8  => emit_riscv_li(comp, dst[0], imm as u8 as i32),
+        OperandSize::S16 => emit_riscv_li(comp, dst[0], imm as u16 as i32),
+        OperandSize::S32 => emit_riscv_li(comp, dst[0], imm as i32),
+        OperandSize::S64 => emit_riscv_li(comp, dst[0], imm as i32),
+    }
+    match size {
+        OperandSize::S64 => emit_riscv_li(comp, dst[1], (imm >> 32) as i32),
+        _ => emit_riscv_li(comp, dst[1], 0),
+    }
+}
+
+#[inline]
+fn emit_load(comp: &mut Compiler, size: OperandSize, addr: Register, dst: [Register; 2]) {
+    match size {
+        OperandSize::S0  => emit_ins(comp, RiscVInstruction::lui(dst[0], 0)),
+        OperandSize::S8  => emit_ins(comp, RiscVInstruction::lbu(addr, dst[0], 0)),
+        OperandSize::S16 => emit_ins(comp, RiscVInstruction::lhu(addr, dst[0], 0)),
+        OperandSize::S32 => emit_ins(comp, RiscVInstruction::lw(addr, dst[0], 0)),
+        OperandSize::S64 => emit_ins(comp, RiscVInstruction::lw(addr, dst[0], 0)),
+    }
+    match size {
+        OperandSize::S64 => emit_ins(comp, RiscVInstruction::lw(addr, dst[1], 4)),
+        _ => emit_ins(comp, RiscVInstruction::lui(dst[1], 0)),
+    }
+}
+
+#[inline]
+fn emit_store(comp: &mut Compiler, size: OperandSize, addr: Register, src: [Register; 2]) {
+    match size {
+        OperandSize::S0  => {},
+        OperandSize::S8  => emit_ins(comp, RiscVInstruction::sb(addr, src[0], 0)),
+        OperandSize::S16 => emit_ins(comp, RiscVInstruction::sh(addr, src[0], 0)),
+        OperandSize::S32 => emit_ins(comp, RiscVInstruction::sw(addr, src[0], 0)),
+        OperandSize::S64 => {
+            emit_ins(comp, RiscVInstruction::sw(addr, src[0], 0));
+            emit_ins(comp, RiscVInstruction::sw(addr, src[1], 4));
+        },
+    }
+}
+
+#[inline]
+fn emit_store_immediate(comp: &mut Compiler, size: OperandSize, addr: Register, imm: i64) {
+    emit_push(comp, RSCRATCH);
+    emit_ins(comp, RiscVInstruction::mv(addr, RSCRATCH[1]));
+    emit_riscv_li(comp, RSCRATCH[0], imm as i32);
+    match size {
+        OperandSize:: S64 => {
+            emit_ins(comp, RiscVInstruction::sw(RSCRATCH[1], RSCRATCH[0], 0));
+            emit_riscv_li(comp, RSCRATCH[0], (imm >> 32) as i32);
+            emit_ins(comp, RiscVInstruction::sw(RSCRATCH[1], RSCRATCH[0], 4));
+        },
+        _ => emit_store(comp, size, RSCRATCH[1], RSCRATCH),
+    }
+    emit_pop(comp, RSCRATCH);
+}
+
+#[inline]
+fn emit_push(comp: &mut Compiler, src: [Register; 2]) {
+    emit_ins(comp, RiscVInstruction::addi(Register::SP, Register::SP, -8));
+    emit_store(comp, OperandSize::S64, Register::SP, src);
+}
+
+#[inline]
+fn emit_pop(comp: &mut Compiler, dst: [Register; 2]) {
+    emit_load(comp, OperandSize::S64, Register::SP, dst);
+    emit_ins(comp, RiscVInstruction::addi(Register::SP, Register::SP, 8));
+}
+
+#[inline]
+fn emit_add(comp: &mut Compiler, size: OperandSize, src: [Register; 2], dst: [Register; 2]) {
+    emit_ins(comp, RiscVInstruction::add(src[0], dst[0], dst[0]));
     match size {
         OperandSize::S32 => {
             emit_riscv_li(comp, dst[1], 0);
         }
         OperandSize::S64 => {
-            emit_riscv_li(comp, dst[1], (imm >> 32) as i32);
+            panic!("unimplemented!");
         }
         _ => panic!()
     }
 }
 
 enum Value {
-    Register(u8),
-    RegisterIndirect(u8, i32, bool),
-    RegisterPlusConstant32(u8, i32, bool),
-    RegisterPlusConstant64(u8, i64, bool),
+    Register([Register; 2]),
+    RegisterIndirect([Register; 2], i32, bool),
+    RegisterPlusConstant32([Register; 2], i32, bool),
+    RegisterPlusConstant64([Register; 2], i64, bool),
     Constant64(i64, bool),
 }
 
@@ -402,7 +513,7 @@ impl std::fmt::Debug for Compiler {
             .field("offset_in_text_section", &self.offset_in_text_section)
             .field("pc_section", &self.result.pc_section)
             .field("anchors", &self.anchors)
-            .field("text_section_jumps", &sel0.text_section_jumps)
+            .field("text_section_jumps", &self.text_section_jumps)
             .finish()
     }
 }
@@ -482,7 +593,7 @@ impl Compiler {
                 emit_validate_instruction_count(self, true, Some(self.pc));
             }
 
-            let dst = if insn.dst == STACK_PTR_REG as u8 { REGISTER_ZERO } else { REGISTER_MAP[insn.dst as usize] };
+            let dst = if insn.dst == STACK_PTR_REG as u8 { RZERO } else { REGISTER_MAP[insn.dst as usize] };
             let src = REGISTER_MAP[insn.src as usize];
             let target_pc = (self.pc as isize + insn.off as isize + 1) as usize;
 
@@ -509,56 +620,56 @@ impl Compiler {
 
                 // BPF_LDX class
                 ebpf::LD_B_REG   => {
-                    emit_address_translation(self, RSCRATCH, Value::RegisterPlusConstant64(src, insn.off as i64, true), 1, AccessType::Load);
-                    emit_ins(self, RiscVInstruction::load(OperandSize::S8, RSCRATCH, dst, X86IndirectAccess::Offset(0)));
+                    emit_address_translation(self, RSCRATCH[0], Value::RegisterPlusConstant64(src, insn.off as i64, true), 1, AccessType::Load);
+                    emit_load(self, OperandSize::S8, RSCRATCH[0], dst);
                 },
                 ebpf::LD_H_REG   => {
-                    emit_address_translation(self, RSCRATCH, Value::RegisterPlusConstant64(src, insn.off as i64, true), 2, AccessType::Load);
-                    emit_ins(self, RiscVInstruction::load(OperandSize::S16, RSCRATCH, dst, X86IndirectAccess::Offset(0)));
+                    emit_address_translation(self, RSCRATCH[0], Value::RegisterPlusConstant64(src, insn.off as i64, true), 2, AccessType::Load);
+                    emit_load(self, OperandSize::S16, RSCRATCH[0], dst);
                 },
                 ebpf::LD_W_REG   => {
-                    emit_address_translation(self, RSCRATCH, Value::RegisterPlusConstant64(src, insn.off as i64, true), 4, AccessType::Load);
-                    emit_ins(self, RiscVInstruction::load(OperandSize::S32, RSCRATCH, dst, X86IndirectAccess::Offset(0)));
+                    emit_address_translation(self, RSCRATCH[0], Value::RegisterPlusConstant64(src, insn.off as i64, true), 4, AccessType::Load);
+                    emit_load(self, OperandSize::S32, RSCRATCH[0], dst);
                 },
                 ebpf::LD_DW_REG  => {
-                    emit_address_translation(self, RSCRATCH, Value::RegisterPlusConstant64(src, insn.off as i64, true), 8, AccessType::Load);
-                    emit_ins(self, RiscVInstruction::load(OperandSize::S64, RSCRATCH, dst, X86IndirectAccess::Offset(0)));
+                    emit_address_translation(self, RSCRATCH[0], Value::RegisterPlusConstant64(src, insn.off as i64, true), 8, AccessType::Load);
+                    emit_load(self, OperandSize::S64, RSCRATCH[0], dst);
                 },
 
                 // BPF_ST class
                 ebpf::ST_B_IMM   => {
-                    emit_address_translation(self, RSCRATCH, Value::RegisterPlusConstant64(dst, insn.off as i64, true), 1, AccessType::Store);
-                    emit_ins(self, RiscVInstruction::store_immediate(OperandSize::S8, RSCRATCH, X86IndirectAccess::Offset(0), insn.imm as i64));
+                    emit_address_translation(self, RSCRATCH[0], Value::RegisterPlusConstant64(dst, insn.off as i64, true), 1, AccessType::Store);
+                    emit_store_immediate(self, OperandSize::S8, RSCRATCH[0], insn.imm as i64);
                 },
                 ebpf::ST_H_IMM   => {
-                    emit_address_translation(self, RSCRATCH, Value::RegisterPlusConstant64(dst, insn.off as i64, true), 2, AccessType::Store);
-                    emit_ins(self, RiscVInstruction::store_immediate(OperandSize::S16, RSCRATCH, X86IndirectAccess::Offset(0), insn.imm as i64));
+                    emit_address_translation(self, RSCRATCH[0], Value::RegisterPlusConstant64(dst, insn.off as i64, true), 2, AccessType::Store);
+                    emit_store_immediate(self, OperandSize::S16, RSCRATCH[0], insn.imm as i64);
                 },
                 ebpf::ST_W_IMM   => {
-                    emit_address_translation(self, RSCRATCH, Value::RegisterPlusConstant64(dst, insn.off as i64, true), 4, AccessType::Store);
-                    emit_ins(self, RiscVInstruction::store_immediate(OperandSize::S32, RSCRATCH, X86IndirectAccess::Offset(0), insn.imm as i64));
+                    emit_address_translation(self, RSCRATCH[0], Value::RegisterPlusConstant64(dst, insn.off as i64, true), 4, AccessType::Store);
+                    emit_store_immediate(self, OperandSize::S32, RSCRATCH[0], insn.imm as i64);
                 },
                 ebpf::ST_DW_IMM  => {
-                    emit_address_translation(self, RSCRATCH, Value::RegisterPlusConstant64(dst, insn.off as i64, true), 8, AccessType::Store);
-                    emit_ins(self, RiscVInstruction::store_immediate(OperandSize::S64, RSCRATCH, X86IndirectAccess::Offset(0), insn.imm as i64));
+                    emit_address_translation(self, RSCRATCH[0], Value::RegisterPlusConstant64(dst, insn.off as i64, true), 8, AccessType::Store);
+                    emit_store_immediate(self, OperandSize::S64, RSCRATCH[0], insn.imm as i64);
                 },
 
                 // BPF_STX class
                 ebpf::ST_B_REG  => {
-                    emit_address_translation(self, RSCRATCH, Value::RegisterPlusConstant64(dst, insn.off as i64, true), 1, AccessType::Store);
-                    emit_ins(self, RiscVInstruction::store(OperandSize::S8, src, RSCRATCH, X86IndirectAccess::Offset(0)));
+                    emit_address_translation(self, RSCRATCH[0], Value::RegisterPlusConstant64(dst, insn.off as i64, true), 1, AccessType::Store);
+                    emit_store(self, OperandSize::S8, RSCRATCH[0], src);
                 },
                 ebpf::ST_H_REG  => {
-                    emit_address_translation(self, RSCRATCH, Value::RegisterPlusConstant64(dst, insn.off as i64, true), 2, AccessType::Store);
-                    emit_ins(self, RiscVInstruction::store(OperandSize::S16, src, RSCRATCH, X86IndirectAccess::Offset(0)));
+                    emit_address_translation(self, RSCRATCH[0], Value::RegisterPlusConstant64(dst, insn.off as i64, true), 2, AccessType::Store);
+                    emit_store(self, OperandSize::S16, RSCRATCH[0], src);
                 },
                 ebpf::ST_W_REG  => {
-                    emit_address_translation(self, RSCRATCH, Value::RegisterPlusConstant64(dst, insn.off as i64, true), 4, AccessType::Store);
-                    emit_ins(self, RiscVInstruction::store(OperandSize::S32, src, RSCRATCH, X86IndirectAccess::Offset(0)));
+                    emit_address_translation(self, RSCRATCH[0], Value::RegisterPlusConstant64(dst, insn.off as i64, true), 4, AccessType::Store);
+                    emit_store(self, OperandSize::S32, RSCRATCH[0], src);
                 },
                 ebpf::ST_DW_REG  => {
-                    emit_address_translation(self, RSCRATCH, Value::RegisterPlusConstant64(dst, insn.off as i64, true), 8, AccessType::Store);
-                    emit_ins(self, RiscVInstruction::store(OperandSize::S64, src, RSCRATCH, X86IndirectAccess::Offset(0)));
+                    emit_address_translation(self, RSCRATCH[0], Value::RegisterPlusConstant64(dst, insn.off as i64, true), 8, AccessType::Store);
+                    emit_store(self, OperandSize::S64, RSCRATCH[0], src);
                 },
 
                 // BPF_ALU class
@@ -785,30 +896,30 @@ impl Compiler {
 
         // Initialize CallDepth to 0
         emit_load_immediate(self, OperandSize::S64, REGISTER_MAP[FRAME_PTR_REG], 0);
-        emit_ins(self, RiscVInstruction::push(REGISTER_MAP[FRAME_PTR_REG], None));
+        emit_push(self, REGISTER_MAP[FRAME_PTR_REG]);
 
         // Initialize the BPF frame and stack pointers (BpfFramePtr and BpfStackPtr)
         if self.config.dynamic_stack_frames {
             // The stack is fully descending from MM_STACK_START + stack_size to MM_STACK_START
-            emit_ins(self, RiscVInstruction::load_immediate(OperandSize::S64, REGISTER_MAP[FRAME_PTR_REG], MM_STACK_START as i64 + self.config.stack_size() as i64));
+            emit_load_immediate(self, OperandSize::S64, REGISTER_MAP[FRAME_PTR_REG], MM_STACK_START as i64 + self.config.stack_size() as i64);
             // Push BpfFramePtr
-            emit_ins(self, RiscVInstruction::push(REGISTER_MAP[FRAME_PTR_REG], None));
+            emit_push(self, REGISTER_MAP[FRAME_PTR_REG]);
             // Push BpfStackPtr
-            emit_ins(self, RiscVInstruction::push(REGISTER_MAP[FRAME_PTR_REG], None));
+            emit_push(self, REGISTER_MAP[FRAME_PTR_REG]);
         } else {
             // The frames are ascending from MM_STACK_START to MM_STACK_START + stack_size. The stack within the frames is descending.
             emit_load_immediate(self, OperandSize::S64, REGISTER_MAP[FRAME_PTR_REG], MM_STACK_START as i64 + self.config.stack_frame_size as i64);
             // Push BpfFramePtr
-            emit_ins(self, RiscVInstruction::push(REGISTER_MAP[FRAME_PTR_REG], None));
+            emit_push(self, REGISTER_MAP[FRAME_PTR_REG]);
             // When using static frames BpfStackPtr is not used
-            emit_load_immediate(self, OperandSize::S64, Register::T6, 0);
-            emit_ins(self, RiscVInstruction::push(Register::T6, None));
+            emit_riscv_li(self, Register::T6, 0);
+            emit_push(self, Register::T6);
         }
 
         // Initialize stop watch
         emit_ins(self, RiscVInstruction::alu(OperandSize::S64, 0x31, RSCRATCH, RSCRATCH, 0, None)); // RSCRATCH ^= RSCRATCH;
-        emit_ins(self, RiscVInstruction::push(RSCRATCH, None));
-        emit_ins(self, RiscVInstruction::push(RSCRATCH, None));
+        emit_push(self, RSCRATCH);
+        emit_push(self, RSCRATCH);
 
         // Initialize frame pointer
         emit_ins(self, RiscVInstruction::mov(OperandSize::S64, Register::SP, Register::T6));
@@ -837,22 +948,22 @@ impl Compiler {
         // Epilogue
         self.set_anchor(ANCHOR_EPILOGUE);
         // Print stop watch value
-        fn stopwatch_result(numerator: u64, denominator: u64) {
-            println!("Stop watch: {} / {} = {}", numerator, denominator, if denominator == 0 { 0.0 } else { numerator as f64 / denominator as f64 });
-        }
-        if self.stopwatch_is_active {
-            emit_rust_call(self, Value::Constant64(stopwatch_result as *const u8 as i64, false), &[
-                Argument { index: 1, value: Value::RegisterIndirect(Register::T6, slot_on_environment_stack(self, EnvironmentStackSlot::StopwatchDenominator), false) },
-                Argument { index: 0, value: Value::RegisterIndirect(Register::T6, slot_on_environment_stack(self, EnvironmentStackSlot::StopwatchNumerator), false) },
-            ], None);
-        }
+//      fn stopwatch_result(numerator: u64, denominator: u64) {
+//          println!("Stop watch: {} / {} = {}", numerator, denominator, if denominator == 0 { 0.0 } else { numerator as f64 / denominator as f64 });
+//      }
+//      if self.stopwatch_is_active {
+//          emit_rust_call(self, Value::Constant64(stopwatch_result as *const u8 as i64, false), &[
+//              Argument { index: 1, value: Value::RegisterIndirect(Register::T6, slot_on_environment_stack(self, EnvironmentStackSlot::StopwatchDenominator), false) },
+//              Argument { index: 0, value: Value::RegisterIndirect(Register::T6, slot_on_environment_stack(self, EnvironmentStackSlot::StopwatchNumerator), false) },
+//          ], None);
+//      }
         // Store instruction_meter in RAX
         emit_ins(self, RiscVInstruction::mov(OperandSize::S64, ARGUMENT_REGISTERS[0], RAX));
         // Restore stack pointer in case the BPF stack was used
         emit_ins(self, RiscVInstruction::lea(OperandSize::S64, Register::T6, Register::SP, Some(X86IndirectAccess::Offset(slot_on_environment_stack(self, EnvironmentStackSlot::LastSavedRegister)))));
         // Restore registers
         for reg in CALLEE_SAVED_REGISTERS.iter().rev() {
-            emit_ins(self, RiscVInstruction::pop(*reg));
+            emit_riscv_pop(self, *reg);
         }
         emit_ins(self, RiscVInstruction::return_near());
 
@@ -860,22 +971,22 @@ impl Compiler {
         if self.config.enable_instruction_tracing {
             self.set_anchor(ANCHOR_TRACE);
             // Save registers on stack
-            emit_ins(self, RiscVInstruction::push(RSCRATCH, None));
-            for reg in REGISTER_MAP.iter().rev() {
-                emit_ins(self, RiscVInstruction::push(*reg, None));
-            }
-            emit_ins(self, RiscVInstruction::mov(OperandSize::S64, Register::SP, REGISTER_MAP[0]));
-            emit_ins(self, RiscVInstruction::alu(OperandSize::S64, 0x81, 0, Register::SP, - 8 * 3, None)); // Register::SP -= 8 * 3;
-            emit_rust_call(self, Value::Constant64(Tracer::trace as *const u8 as i64, false), &[
-                Argument { index: 1, value: Value::Register(REGISTER_MAP[0]) }, // registers
-                Argument { index: 0, value: Value::RegisterPlusConstant32(R10, ProgramEnvironment::TRACER_OFFSET as i32 + self.program_argument_key, false) }, // jit.tracer
-            ], None);
-            // Pop stack and return
-            emit_ins(self, RiscVInstruction::alu(OperandSize::S64, 0x81, 0, Register::SP, 8 * 3, None)); // Register::SP += 8 * 3;
-            emit_ins(self, RiscVInstruction::pop(REGISTER_MAP[0]));
-            emit_ins(self, RiscVInstruction::alu(OperandSize::S64, 0x81, 0, Register::SP, 8 * (REGISTER_MAP.len() - 1) as i64, None)); // Register::SP += 8 * (REGISTER_MAP.len() - 1);
-            emit_ins(self, RiscVInstruction::pop(RSCRATCH));
-            emit_ins(self, RiscVInstruction::return_near());
+//          emit_push(self, RSCRATCH);
+//          for reg in REGISTER_MAP.iter().rev() {
+//              emit_push(self, *reg);
+//          }
+//          emit_ins(self, RiscVInstruction::mov(OperandSize::S64, Register::SP, REGISTER_MAP[0]));
+//          emit_ins(self, RiscVInstruction::alu(OperandSize::S64, 0x81, 0, Register::SP, - 8 * 3, None)); // Register::SP -= 8 * 3;
+//          emit_rust_call(self, Value::Constant64(Tracer::trace as *const u8 as i64, false), &[
+//              Argument { index: 1, value: Value::Register(REGISTER_MAP[0]) }, // registers
+//              Argument { index: 0, value: Value::RegisterPlusConstant32(R10, ProgramEnvironment::TRACER_OFFSET as i32 + self.program_argument_key, false) }, // jit.tracer
+//          ], None);
+//          // Pop stack and return
+//          emit_ins(self, RiscVInstruction::alu(OperandSize::S64, 0x81, 0, Register::SP, 8 * 3, None)); // Register::SP += 8 * 3;
+//          emit_pop(self, REGISTER_MAP[0]);
+//          emit_ins(self, RiscVInstruction::alu(OperandSize::S64, 0x81, 0, Register::SP, 8 * (REGISTER_MAP.len() - 1) as i64, None)); // Register::SP += 8 * (REGISTER_MAP.len() - 1);
+//          emit_pop(self, RSCRATCH);
+//          emit_ins(self, RiscVInstruction::return_near());
         }
 
         // Handler for syscall exceptions
@@ -946,7 +1057,7 @@ impl Compiler {
 
         // Routine for syscall
         self.set_anchor(ANCHOR_SYSCALL);
-        emit_ins(self, RiscVInstruction::push(RSCRATCH, None)); // Padding for stack alignment
+        emit_push(self, RSCRATCH); // Padding for stack alignment
         if self.config.enable_instruction_meter {
             // RDI = *PrevInsnMeter - RDI;
             emit_ins(self, RiscVInstruction::alu(OperandSize::S64, 0x2B, ARGUMENT_REGISTERS[0], Register::T6, 0, Some(X86IndirectAccess::Offset(slot_on_environment_stack(self, EnvironmentStackSlot::PrevInsnMeter))))); // RDI -= *PrevInsnMeter;
@@ -977,7 +1088,7 @@ impl Compiler {
         emit_result_is_err::<E>(self, Register::T6, RSCRATCH, X86IndirectAccess::Offset(slot_on_environment_stack(self, EnvironmentStackSlot::OptRetValPtr)));
         emit_ins(self, RiscVInstruction::conditional_jump_immediate(0x85, self.relative_to_anchor(ANCHOR_RUST_EXCEPTION, 6)));
         // Store Ok value in result register
-        emit_ins(self, RiscVInstruction::pop(RSCRATCH));
+        emit_pop(self, RSCRATCH);
         emit_ins(self, RiscVInstruction::load(OperandSize::S64, Register::T6, RSCRATCH, X86IndirectAccess::Offset(slot_on_environment_stack(self, EnvironmentStackSlot::OptRetValPtr))));
         emit_ins(self, RiscVInstruction::load(OperandSize::S64, RSCRATCH, REGISTER_MAP[0], X86IndirectAccess::Offset(8)));
         emit_ins(self, RiscVInstruction::return_near());
@@ -1019,55 +1130,26 @@ impl Compiler {
 
         // Routine for emit_bpf_call(Value::Register())
         self.set_anchor(ANCHOR_BPF_CALL_REG);
-        // Force alignment of RAX
-        emit_ins(self, RiscVInstruction::alu(OperandSize::S64, 0x81, 4, REGISTER_MAP[0], !(INSN_SIZE as i64 - 1), None)); // RAX &= !(INSN_SIZE - 1);
-        // Upper bound check
-        // if(RAX >= self.program_vm_addr + number_of_instructions * INSN_SIZE) throw CALL_OUTSIDE_TEXT_SEGMENT;
-        let number_of_instructions = self.result.pc_section.len() - 1;
-        emit_ins(self, RiscVInstruction::load_immediate(OperandSize::S64, REGISTER_MAP[FRAME_PTR_REG], self.program_vm_addr as i64 + (number_of_instructions * INSN_SIZE) as i64));
-        emit_ins(self, RiscVInstruction::cmp(OperandSize::S64, REGISTER_MAP[FRAME_PTR_REG], REGISTER_MAP[0], None));
-        emit_ins(self, RiscVInstruction::conditional_jump_immediate(0x83, self.relative_to_anchor(ANCHOR_CALL_OUTSIDE_TEXT_SEGMENT, 6)));
-        // Lower bound check
-        // if(RAX < self.program_vm_addr) throw CALL_OUTSIDE_TEXT_SEGMENT;
-        emit_load_immediate(self, OperandSize::S64, REGISTER_MAP[FRAME_PTR_REG], self.program_vm_addr as i64);
-        emit_ins(self, RiscVInstruction::cmp(OperandSize::S64, REGISTER_MAP[FRAME_PTR_REG], REGISTER_MAP[0], None));
-        emit_ins(self, RiscVInstruction::conditional_jump_immediate(0x82, self.relative_to_anchor(ANCHOR_CALL_OUTSIDE_TEXT_SEGMENT, 6)));
-        // Calculate offset relative to instruction_addresses
-        emit_ins(self, RiscVInstruction::alu(OperandSize::S64, 0x29, REGISTER_MAP[FRAME_PTR_REG], REGISTER_MAP[0], 0, None)); // RAX -= self.program_vm_addr;
-        // Calculate the target_pc (dst / INSN_SIZE) to update the instruction_meter
-        let shift_amount = INSN_SIZE.trailing_zeros();
-        debug_assert_eq!(INSN_SIZE, 1 << shift_amount);
-        emit_ins(self, RiscVInstruction::mov(OperandSize::S64, REGISTER_MAP[0], RSCRATCH));
-        emit_ins(self, RiscVInstruction::alu(OperandSize::S64, 0xc1, 5, RSCRATCH, shift_amount as i64, None));
-        // Save BPF target pc for potential ANCHOR_CALLX_UNSUPPORTED_INSTRUCTION
-        emit_ins(self, RiscVInstruction::store(OperandSize::S64, RSCRATCH, Register::SP, X86IndirectAccess::OffsetIndexShift(-8, Register::SP, 0))); // Register::SP[-8] = RSCRATCH;
-        // Load host target_address from self.result.pc_section
-        debug_assert_eq!(INSN_SIZE, 8); // Because the instruction size is also the slot size we do not need to shift the offset
-        emit_ins(self, RiscVInstruction::load_immediate(OperandSize::S64, REGISTER_MAP[FRAME_PTR_REG], self.result.pc_section.as_ptr() as i64));
-        emit_ins(self, RiscVInstruction::alu(OperandSize::S64, 0x01, REGISTER_MAP[FRAME_PTR_REG], REGISTER_MAP[0], 0, None)); // RAX += self.result.pc_section;
-        emit_ins(self, RiscVInstruction::load(OperandSize::S64, REGISTER_MAP[0], REGISTER_MAP[0], X86IndirectAccess::Offset(0))); // RAX = self.result.pc_section[RAX / 8];
-        // Load the frame pointer again since we've clobbered REGISTER_MAP[FRAME_PTR_REG]
-        emit_ins(self, RiscVInstruction::load(OperandSize::S64, Register::T6, REGISTER_MAP[FRAME_PTR_REG], X86IndirectAccess::Offset(slot_on_environment_stack(self, EnvironmentStackSlot::BpfFramePtr))));
-        emit_ins(self, RiscVInstruction::return_near());
+        // TODO
 
         // Translates a host pc back to a BPF pc by linear search of the pc_section table
         self.set_anchor(ANCHOR_TRANSLATE_PC);
-        emit_ins(self, RiscVInstruction::push(REGISTER_MAP[0], None)); // Save REGISTER_MAP[0]
-        emit_ins(self, RiscVInstruction::load_immediate(OperandSize::S64, REGISTER_MAP[0], self.result.pc_section.as_ptr() as i64 - 8)); // Loop index and pointer to look up
+        emit_push(self, REGISTER_MAP[0]); // Save REGISTER_MAP[0]
+        emit_load_immediate(self, OperandSize::S64, REGISTER_MAP[0], self.result.pc_section.as_ptr() as i64 - 8); // Loop index and pointer to look up
         self.set_anchor(ANCHOR_TRANSLATE_PC_LOOP); // Loop label
         emit_ins(self, RiscVInstruction::alu(OperandSize::S64, 0x81, 0, REGISTER_MAP[0], 8, None)); // Increase index
         emit_ins(self, RiscVInstruction::cmp(OperandSize::S64, RSCRATCH, REGISTER_MAP[0], Some(X86IndirectAccess::Offset(8)))); // Look up and compare against value at next index
         emit_ins(self, RiscVInstruction::conditional_jump_immediate(0x86, self.relative_to_anchor(ANCHOR_TRANSLATE_PC_LOOP, 6))); // Continue while *REGISTER_MAP[0] <= RSCRATCH
         emit_ins(self, RiscVInstruction::mov(OperandSize::S64, REGISTER_MAP[0], RSCRATCH)); // RSCRATCH = REGISTER_MAP[0];
-        emit_ins(self, RiscVInstruction::load_immediate(OperandSize::S64, REGISTER_MAP[0], self.result.pc_section.as_ptr() as i64)); // REGISTER_MAP[0] = self.result.pc_section;
+        emit_load_immediate(self, OperandSize::S64, REGISTER_MAP[0], self.result.pc_section.as_ptr() as i64); // REGISTER_MAP[0] = self.result.pc_section;
         emit_ins(self, RiscVInstruction::alu(OperandSize::S64, 0x29, REGISTER_MAP[0], RSCRATCH, 0, None)); // RSCRATCH -= REGISTER_MAP[0];
         emit_ins(self, RiscVInstruction::alu(OperandSize::S64, 0xc1, 5, RSCRATCH, 3, None)); // RSCRATCH >>= 3;
-        emit_ins(self, RiscVInstruction::pop(REGISTER_MAP[0])); // Restore REGISTER_MAP[0]
+        emit_pop(self, REGISTER_MAP[0]); // Restore REGISTER_MAP[0]
         emit_ins(self, RiscVInstruction::return_near());
 
         self.set_anchor(ANCHOR_MEMORY_ACCESS_VIOLATION);
         emit_ins(self, RiscVInstruction::alu(OperandSize::S64, 0x81, 0, Register::SP, 8, None));
-        emit_ins(self, RiscVInstruction::pop(RSCRATCH)); // Put callers PC in RSCRATCH
+        emit_pop(self, RSCRATCH); // Put callers PC in RSCRATCH
         emit_ins(self, RiscVInstruction::call_immediate(self.relative_to_anchor(ANCHOR_TRANSLATE_PC, 5)));
         emit_ins(self, RiscVInstruction::jump_immediate(self.relative_to_anchor(ANCHOR_EXCEPTION_AT, 5)));
 
@@ -1084,7 +1166,7 @@ impl Compiler {
         ] {
             let target_offset = len.trailing_zeros() as usize + 4 * (*access_type as usize);
             self.set_anchor(ANCHOR_TRANSLATE_MEMORY_ADDRESS + target_offset);
-            emit_ins(self, RiscVInstruction::push(RSCRATCH, None));
+            emit_push(self, RSCRATCH);
             // call MemoryMapping::map() storing the result in EnvironmentStackSlot::OptRetValPtr
             emit_rust_call(self, Value::Constant64(MemoryMapping::map::<UserError> as *const u8 as i64, false), &[
                 Argument { index: 3, value: Value::Register(RSCRATCH) }, // Specify first as the src register could be overwritten by other arguments
