@@ -132,14 +132,17 @@ const REGISTER_MAP: [[Register; 2]; 11] = [
     [CALLEE_SAVED_REGISTERS[9], CALLEE_SAVED_REGISTERS[10]],
 ];
 
-const RENV: [Register; 2] = [Register::T6, Register::X0];
 const RZERO: [Register; 2] = [Register::X0, Register::X0];
 const RSCRATCH: [Register; 2] = [CALLEE_SAVED_REGISTERS[11], CALLEE_SAVED_REGISTERS[12]];
+const RSCRATCH2: Register = Register::TP;
 
 // Special registers:
 //      ARGUMENT_REGISTERS[0]  A0      BPF program counter limit (used by instruction meter)
 //                   RSCRATCH  S10,S11 Scratch register
 // CALLER_SAVED_REGISTERS[15]  T6      Constant pointer to initial Register::SP - 8
+// CALLER_SAVED_REGISTERS[ 0]  RA      Return address
+// CALLEE_SAVED_REGISTERS[ 0]  SP      Stack pointer
+//                  RSCRATCH2  TP      Secondary scratch
 
 #[inline]
 pub fn emit<T>(jit: &mut Compiler, data: T) {
@@ -347,7 +350,7 @@ fn emit_address_translation(comp: &mut Compiler, host_addr: Register, vm_addr: V
         },
     }
     let anchor = ANCHOR_TRANSLATE_MEMORY_ADDRESS + len.trailing_zeros() as usize + 4 * (access_type as usize);
-    emit_call(comp, comp.relative_to_anchor(anchor, 5));
+    emit_call(comp, comp.relative_to_anchor(anchor));
     emit_ins(comp, RiscVInstruction::mv(RSCRATCH[0], host_addr));
 }
 
@@ -415,18 +418,15 @@ fn emit_store(comp: &mut Compiler, size: OperandSize, addr: Register, src: [Regi
 
 #[inline]
 fn emit_store_immediate(comp: &mut Compiler, size: OperandSize, addr: Register, imm: i64) {
-    emit_push(comp, RSCRATCH);
-    emit_ins(comp, RiscVInstruction::mv(addr, RSCRATCH[1]));
-    emit_riscv_li(comp, RSCRATCH[0], imm as i32);
+    emit_riscv_li(comp, RSCRATCH2, imm as i32);
     match size {
         OperandSize:: S64 => {
-            emit_ins(comp, RiscVInstruction::sw(RSCRATCH[1], RSCRATCH[0], 0));
-            emit_riscv_li(comp, RSCRATCH[0], (imm >> 32) as i32);
-            emit_ins(comp, RiscVInstruction::sw(RSCRATCH[1], RSCRATCH[0], 4));
+            emit_ins(comp, RiscVInstruction::sw(addr, RSCRATCH2, 0));
+            emit_riscv_li(comp, RSCRATCH2, (imm >> 32) as i32);
+            emit_ins(comp, RiscVInstruction::sw(addr, RSCRATCH2, 4));
         },
-        _ => emit_store(comp, size, RSCRATCH[1], RSCRATCH),
+        _ => emit_store(comp, size, addr, [RSCRATCH2, Register::X0]),
     }
-    emit_pop(comp, RSCRATCH);
 }
 
 #[inline]
@@ -441,12 +441,33 @@ fn emit_pop(comp: &mut Compiler, dst: [Register; 2]) {
     emit_ins(comp, RiscVInstruction::addi(Register::SP, Register::SP, 8));
 }
 
+//#[inline]
+//fn emit_push_imm32(comp: &mut Compiler, imm: i32) {
+//    emit_riscv_push(comp, Register::X0);
+//    emit_riscv_push(comp, RSCRATCH[0]);
+//    emit_riscv_li(comp, RSCRATCH[0], imm);
+//    emit_ins(comp, RiscVInstruction::sw(Register::SP, RSCRATCH[0], 4));
+//    emit_riscv_pop(comp, RSCRATCH[0]);
+//}
+
+#[inline]
+fn emit_call(comp: &mut Compiler, offset: i32) {
+    emit_riscv_push(comp, Register::RA);
+    emit_ins(comp, RiscVInstruction::jal(Register::RA, offset));
+    emit_riscv_pop(comp, Register::RA);
+}
+
+#[inline]
+fn emit_return(comp: &mut Compiler) {
+    emit_ins(comp, RiscVInstruction::jalr(Register::RA, Register::X0, 0));
+}
+
 #[inline]
 fn emit_add(comp: &mut Compiler, size: OperandSize, src: [Register; 2], dst: [Register; 2]) {
     emit_ins(comp, RiscVInstruction::add(src[0], dst[0], dst[0]));
     match size {
         OperandSize::S32 => {
-            emit_riscv_li(comp, dst[1], 0);
+            emit_riscv_li(comp, dst[1], 0); // zero-extended according to the BPF spec
         }
         OperandSize::S64 => {
             panic!("unimplemented!");
@@ -913,7 +934,7 @@ impl Compiler {
             emit_push(self, REGISTER_MAP[FRAME_PTR_REG]);
             // When using static frames BpfStackPtr is not used
             emit_riscv_li(self, Register::T6, 0);
-            emit_push(self, Register::T6);
+            emit_push(self, [Register::T6, Register::X0]);
         }
 
         // Initialize stop watch
@@ -922,7 +943,7 @@ impl Compiler {
         emit_push(self, RSCRATCH);
 
         // Initialize frame pointer
-        emit_ins(self, RiscVInstruction::mov(OperandSize::S64, Register::SP, Register::T6));
+        emit_ins(self, RiscVInstruction::mv(Register::SP, Register::T6));
         emit_ins(self, RiscVInstruction::alu(OperandSize::S64, 0x81, 0, Register::T6, 8 * (EnvironmentStackSlot::SlotCount as i64 - 1 + self.environment_stack_key as i64), None));
 
         // Zero BPF registers
@@ -1194,10 +1215,9 @@ impl Compiler {
         self.anchors[anchor] = unsafe { self.result.text_section.as_ptr().add(self.offset_in_text_section) };
     }
 
-    // instruction_length = 5 (Unconditional jump / call)
-    // instruction_length = 6 (Conditional jump)
     #[inline]
-    fn relative_to_anchor(&self, anchor: usize, instruction_length: usize) -> i32 {
+    fn relative_to_anchor(&self, anchor: usize) -> i32 {
+        let instruction_length = 4;
         let instruction_end = unsafe { self.result.text_section.as_ptr().add(self.offset_in_text_section).add(instruction_length) };
         let destination = self.anchors[anchor];
         debug_assert!(!destination.is_null());
@@ -1205,7 +1225,8 @@ impl Compiler {
     }
 
     #[inline]
-    fn relative_to_target_pc(&mut self, target_pc: usize, instruction_length: usize) -> i32 {
+    fn relative_to_target_pc(&mut self, target_pc: usize) -> i32 {
+        let instruction_length = 4;
         let instruction_end = unsafe { self.result.text_section.as_ptr().add(self.offset_in_text_section).add(instruction_length) };
         let destination = if self.result.pc_section[target_pc] != 0 {
             // Backward jump

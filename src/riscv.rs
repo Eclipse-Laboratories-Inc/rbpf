@@ -37,8 +37,6 @@ pub enum Register {
     T6  = 31,
 }
 
-// System V AMD64 ABI
-// Works on: Linux, macOS, BSD and Solaris but not on Windows
 pub const ARGUMENT_REGISTERS: [Register; 8] = [
     Register::A0,
     Register::A1,
