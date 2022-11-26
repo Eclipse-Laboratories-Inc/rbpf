@@ -1,4 +1,7 @@
 #![allow(clippy::integer_arithmetic)]
+
+//! This module includes functions to output RISC-V bytecode
+
 use crate::compiler::{emit, Compiler};
 
 #[derive(Copy, Clone, PartialEq)]

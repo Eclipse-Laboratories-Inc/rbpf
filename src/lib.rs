@@ -10,7 +10,6 @@
 // copied, modified, or distributed except according to those terms.
 
 //! Virtual machine and JIT compiler for eBPF programs.
-#![warn(missing_docs)]
 #![doc(
     html_logo_url = "https://raw.githubusercontent.com/qmonnet/rbpf/master/misc/rbpf.png",
     html_favicon_url = "https://raw.githubusercontent.com/qmonnet/rbpf/master/misc/rbpf.ico"
@@ -48,8 +47,8 @@ pub mod verifier;
 pub mod vm;
 #[cfg(feature = "jit")]
 mod x86;
-mod compiler;
-mod riscv;
+pub mod compiler;
+pub mod riscv;
 
 trait ErrCheckedArithmetic: Sized {
     fn err_checked_add(self, other: Self) -> Result<Self, ArithmeticOverflow>;
