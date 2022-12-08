@@ -96,14 +96,14 @@ pub enum InstructionFormat {
 
 #[derive(Copy, Clone)]
 pub struct RiscVInstruction {
-    format: InstructionFormat,
-    opcode: u8,
-    funct3 : u8,
-    funct7 : u8,
-    source1: Register,
-    source2: Register,
-    destination: Register,
-    immediate: i32,
+    pub format: InstructionFormat,
+    pub opcode: u8,
+    pub funct3 : u8,
+    pub funct7 : u8,
+    pub source1: Register,
+    pub source2: Register,
+    pub destination: Register,
+    pub immediate: i32,
 }
 
 #[inline]
