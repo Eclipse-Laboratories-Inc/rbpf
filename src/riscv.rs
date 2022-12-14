@@ -108,7 +108,7 @@ pub struct RiscVInstruction {
 
 #[inline]
 fn pick_bits(num: i32, most_sig : u8, least_sig : u8, offset : u8) -> u32 {
-    return (((num as u32) >> least_sig) | ((1 << (most_sig - least_sig + 1)) - 1)) << offset;
+    return (((num as u32) >> least_sig) & ((1 << (most_sig - least_sig + 1)) - 1)) << offset;
 }
 
 macro_rules! define_instruction {
