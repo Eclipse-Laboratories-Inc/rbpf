@@ -263,7 +263,7 @@ impl RiscVInstruction {
                 pick_bits(self.immediate, 11, 5, 25) | pick_bits(self.immediate, 4, 0, 7),
             InstructionFormat::B =>
                 pick_bits(self.immediate, 12, 12, 31) | pick_bits(self.immediate, 10, 5, 25)
-                | pick_bits(self.immediate, 1, 4, 8) | pick_bits(self.immediate, 11, 11, 7),
+                | pick_bits(self.immediate, 4, 1, 8) | pick_bits(self.immediate, 11, 11, 7),
             InstructionFormat::U =>
                 pick_bits(self.immediate, 31, 12, 12),
             InstructionFormat::J =>
