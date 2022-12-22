@@ -367,7 +367,7 @@ fn emit_c_call(comp: &mut Compiler, symbol: &'static str) {
     emit_ins(comp, RiscVInstruction::mv(ARGUMENT_REGISTERS[1], RSCRATCH[1]));
 
     // pop saved registers
-    for reg in saved_registers.iter() {
+    for reg in saved_registers.iter().rev() {
         emit_riscv_pop(comp, *reg);
     }
 }
@@ -388,7 +388,7 @@ fn emit_address_translation(comp: &mut Compiler, host_addr: Register, vm_addr: V
         },
     }
     emit_c_call(comp, "translate_memory_address");
-    let anchor = ANCHOR_TRANSLATE_MEMORY_ADDRESS + len.trailing_zeros() as usize + 4 * (access_type as usize);
+//  let anchor = ANCHOR_TRANSLATE_MEMORY_ADDRESS + len.trailing_zeros() as usize + 4 * (access_type as usize);
 //  emit_call(comp, comp.relative_to_anchor(anchor));
 //  emit_ins(comp, RiscVInstruction::mv(RSCRATCH[0], host_addr));
 }
@@ -397,9 +397,9 @@ fn emit_address_translation(comp: &mut Compiler, host_addr: Register, vm_addr: V
 #[inline]
 fn make_split_immediate(imm: i32) -> (i32, i32) {
     if imm & (1 << 11) == 0 {
-        return (imm, imm);
+        (imm, imm)
     } else {
-        return (imm + (1 << 12), imm);
+        (imm + (1 << 12), imm)
     }
 }
 
@@ -420,12 +420,12 @@ fn emit_jump_to_pc(comp: &mut Compiler, return_reg: Register, target_pc: usize) 
 #[inline]
 fn emit_jump(comp: &mut Compiler, return_reg: Register, offset: i32) {
     assert!(offset % 4 == 0);
-    // check if the offset is the sign extension of its lower 21 bits
-    if (offset >> 20 != 0) && (offset >> 20 != -1) {
+    // check if the offset is the sign extension of its lower 20 bits
+    if (offset >> 19 != 0) && (offset >> 19 != -1) {
         // offset is too big for JAL
         emit_long_jump(comp, return_reg, offset);
     } else {
-        emit_ins(comp, RiscVInstruction::jal(return_reg, offset >> 1));
+        emit_ins(comp, RiscVInstruction::jal(return_reg, offset));
     }
 }
 
@@ -438,8 +438,13 @@ fn emit_long_jump(comp: &mut Compiler, return_reg: Register, offset: i32) {
 
 #[inline]
 fn emit_riscv_li(comp: &mut Compiler, dst: Register, imm: i32) {
+    emit_riscv_li_controlled(comp, dst, imm, false);
+}
+
+#[inline]
+fn emit_riscv_li_controlled(comp: &mut Compiler, dst: Register, imm: i32, force_two_instructions : bool) {
     let (upper, lower) = make_split_immediate(imm);
-    if upper >> 12 == 0 {
+    if force_two_instructions || upper >> 12 == 0 {
         emit_ins(comp, RiscVInstruction::addi(Register::X0, dst, lower));
     } else {
         emit_ins(comp, RiscVInstruction::lui(dst, upper));
@@ -580,7 +585,9 @@ fn emit_add(comp: &mut Compiler, size: OperandSize, src: [Register; 2], dst: [Re
             emit_riscv_li(comp, dst[1], 0);
         }
         OperandSize::S64 => {
-            panic!("unimplemented!");
+            emit_ins(comp, RiscVInstruction::sltu(dst[0], src[0], RSCRATCH2));
+            emit_ins(comp, RiscVInstruction::add(dst[1], RSCRATCH2, dst[1]));
+            emit_ins(comp, RiscVInstruction::add(dst[1], src[1], dst[1]));
         }
         _ => panic!("unsupported instruction!")
     }
@@ -1031,10 +1038,12 @@ impl Compiler {
 
                     // If CallDepth == 0, we've reached the exit instruction of the entry point
                     if self.config.enable_instruction_meter {
-                        emit_ins(self, RiscVInstruction::bne(REGISTER_MAP[FRAME_PTR_REG][0], Register::X0, 6));
-                        emit_load_immediate(self, OperandSize::S64, RSCRATCH, self.pc as i64);
+                        emit_ins(self, RiscVInstruction::bne(REGISTER_MAP[FRAME_PTR_REG][0], Register::X0, 4 * 6));
+                        // manually load so that we know how many instructions to jump
+                        emit_riscv_li_controlled(self, RSCRATCH[0], self.pc as i32, true);
+                        emit_riscv_li_controlled(self, RSCRATCH[1], (self.pc >> 32) as i32, true);
                     } else {
-                        emit_ins(self, RiscVInstruction::bne(REGISTER_MAP[FRAME_PTR_REG][0], Register::X0, 4));
+                        emit_ins(self, RiscVInstruction::bne(REGISTER_MAP[FRAME_PTR_REG][0], Register::X0, 4 * 2));
                     }
                     // we're done
                     emit_jump_to_anchor(self, Register::X0, ANCHOR_EXIT);
@@ -1142,8 +1151,6 @@ impl Compiler {
     }
 
     fn generate_subroutines<E: UserDefinedError, I: InstructionMeter>(&mut self) -> Result<(), EbpfError<E>> {
-        //TODO implement these
-
         // Epilogue
         self.set_anchor(ANCHOR_EPILOGUE);
         // Print stop watch value
@@ -1159,7 +1166,7 @@ impl Compiler {
         // Store instruction_meter in RAX
 //      emit_ins(self, RiscVInstruction::mv(OperandSize::S64, ARGUMENT_REGISTERS[0], RAX));
         // Restore stack pointer in case the BPF stack was used
-        emit_ins(self, RiscVInstruction::lw(Register::T6, Register::SP, slot_on_environment_stack(self, EnvironmentStackSlot::LastSavedRegister)));
+        emit_ins(self, RiscVInstruction::addi(Register::T6, Register::SP, slot_on_environment_stack(self, EnvironmentStackSlot::LastSavedRegister)));
         // Restore registers
         for reg in CALLEE_SAVED_REGISTERS.iter().rev() {
             if *reg != Register::SP {
@@ -1477,7 +1484,7 @@ mod tests {
     fn test_code_length_estimate() {
         const INSTRUCTION_COUNT: usize = 256;
         let mut prog = [0; ebpf::INSN_SIZE * INSTRUCTION_COUNT];
-    
+
         let empty_program_machine_code_length = {
             prog[0] = ebpf::EXIT;
             let mut executable = create_mockup_executable(&[]);
@@ -1485,7 +1492,7 @@ mod tests {
             executable.get_compiled_program().unwrap().machine_code_length()
         };
         assert!(empty_program_machine_code_length <= MAX_EMPTY_PROGRAM_MACHINE_CODE_LENGTH);
-    
+
         for opcode in 0..255 {
             for pc in 0..INSTRUCTION_COUNT {
                 prog[pc * ebpf::INSN_SIZE] = opcode;
