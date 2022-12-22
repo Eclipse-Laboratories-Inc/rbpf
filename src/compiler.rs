@@ -184,6 +184,7 @@ pub enum OperandSize {
 }
 
 /// Indices of slots inside the struct at initial Register::SP
+#[allow(dead_code)]
 #[repr(C)]
 enum EnvironmentStackSlot {
     /// The 12 non-SP CALLEE_SAVED_REGISTERS, divided by 2
@@ -308,6 +309,7 @@ fn emit_validate_and_profile_instruction_count(jit: &mut Compiler, exclusive: bo
 //    }
 }
 
+#[allow(dead_code)]
 #[allow(unused_variables)]
 #[inline]
 fn emit_undo_profile_instruction_count(jit: &mut Compiler, target_pc: usize) {
@@ -373,7 +375,7 @@ fn emit_c_call(comp: &mut Compiler, symbol: &'static str) {
 }
 
 #[inline]
-fn emit_address_translation(comp: &mut Compiler, host_addr: Register, vm_addr: Value, len: u64, access_type: AccessType) {
+fn emit_address_translation(comp: &mut Compiler, vm_addr: Value) {
     match vm_addr {
         Value::RegisterPlusConstant64(reg, constant, _) => {
             emit_load_immediate(comp, OperandSize::S64, RSCRATCH, constant);
@@ -388,9 +390,6 @@ fn emit_address_translation(comp: &mut Compiler, host_addr: Register, vm_addr: V
         },
     }
     emit_c_call(comp, "translate_memory_address");
-//  let anchor = ANCHOR_TRANSLATE_MEMORY_ADDRESS + len.trailing_zeros() as usize + 4 * (access_type as usize);
-//  emit_call(comp, comp.relative_to_anchor(anchor));
-//  emit_ins(comp, RiscVInstruction::mv(RSCRATCH[0], host_addr));
 }
 
 // RISC-V sign-extends the 12-bit immediate, so an extra step is necessary to compensate
@@ -537,6 +536,7 @@ fn emit_push(comp: &mut Compiler, src: [Register; 2]) {
     emit_store(comp, OperandSize::S64, Register::SP, src);
 }
 
+#[allow(dead_code)]
 #[inline]
 fn emit_pop(comp: &mut Compiler, dst: [Register; 2]) {
     emit_load(comp, OperandSize::S64, Register::SP, dst);
@@ -559,6 +559,7 @@ fn emit_call(comp: &mut Compiler, offset: i32) {
     emit_riscv_pop(comp, Register::RA);
 }
 
+#[allow(dead_code)]
 #[inline]
 fn emit_call_reg(comp: &mut Compiler, reg: Register) {
     emit_riscv_push(comp, Register::RA);
@@ -651,6 +652,7 @@ fn emit_mov(comp: &mut Compiler, size: OperandSize, src: [Register; 2], dst: [Re
     }
 }
 
+#[allow(dead_code)]
 enum Value {
     Register([Register; 2]),
     RegisterIndirect([Register; 2], i32, bool),
@@ -670,6 +672,7 @@ pub struct Relocation {
     pub symbol: &'static str,
 }
 
+#[allow(dead_code)]
 pub struct Compiler {
     pub result: ProgramSections,
     text_section_jumps: Vec<Jump>,
@@ -825,55 +828,55 @@ impl Compiler {
 
                 // BPF_LDX class
                 ebpf::LD_B_REG   => {
-                    emit_address_translation(self, RSCRATCH[0], Value::RegisterPlusConstant64(src, insn.off as i64, true), 1, AccessType::Load);
+                    emit_address_translation(self, Value::RegisterPlusConstant64(src, insn.off as i64, true));
                     emit_load(self, OperandSize::S8, RSCRATCH[0], dst);
                 },
                 ebpf::LD_H_REG   => {
-                    emit_address_translation(self, RSCRATCH[0], Value::RegisterPlusConstant64(src, insn.off as i64, true), 2, AccessType::Load);
+                    emit_address_translation(self, Value::RegisterPlusConstant64(src, insn.off as i64, true));
                     emit_load(self, OperandSize::S16, RSCRATCH[0], dst);
                 },
                 ebpf::LD_W_REG   => {
-                    emit_address_translation(self, RSCRATCH[0], Value::RegisterPlusConstant64(src, insn.off as i64, true), 4, AccessType::Load);
+                    emit_address_translation(self, Value::RegisterPlusConstant64(src, insn.off as i64, true));
                     emit_load(self, OperandSize::S32, RSCRATCH[0], dst);
                 },
                 ebpf::LD_DW_REG  => {
-                    emit_address_translation(self, RSCRATCH[0], Value::RegisterPlusConstant64(src, insn.off as i64, true), 8, AccessType::Load);
+                    emit_address_translation(self, Value::RegisterPlusConstant64(src, insn.off as i64, true));
                     emit_load(self, OperandSize::S64, RSCRATCH[0], dst);
                 },
 
                 // BPF_ST class
                 ebpf::ST_B_IMM   => {
-                    emit_address_translation(self, RSCRATCH[0], Value::RegisterPlusConstant64(dst, insn.off as i64, true), 1, AccessType::Store);
+                    emit_address_translation(self, Value::RegisterPlusConstant64(dst, insn.off as i64, true));
                     emit_store_immediate(self, OperandSize::S8, RSCRATCH[0], insn.imm as i64);
                 },
                 ebpf::ST_H_IMM   => {
-                    emit_address_translation(self, RSCRATCH[0], Value::RegisterPlusConstant64(dst, insn.off as i64, true), 2, AccessType::Store);
+                    emit_address_translation(self, Value::RegisterPlusConstant64(dst, insn.off as i64, true));
                     emit_store_immediate(self, OperandSize::S16, RSCRATCH[0], insn.imm as i64);
                 },
                 ebpf::ST_W_IMM   => {
-                    emit_address_translation(self, RSCRATCH[0], Value::RegisterPlusConstant64(dst, insn.off as i64, true), 4, AccessType::Store);
+                    emit_address_translation(self, Value::RegisterPlusConstant64(dst, insn.off as i64, true));
                     emit_store_immediate(self, OperandSize::S32, RSCRATCH[0], insn.imm as i64);
                 },
                 ebpf::ST_DW_IMM  => {
-                    emit_address_translation(self, RSCRATCH[0], Value::RegisterPlusConstant64(dst, insn.off as i64, true), 8, AccessType::Store);
+                    emit_address_translation(self, Value::RegisterPlusConstant64(dst, insn.off as i64, true));
                     emit_store_immediate(self, OperandSize::S64, RSCRATCH[0], insn.imm as i64);
                 },
 
                 // BPF_STX class
                 ebpf::ST_B_REG  => {
-                    emit_address_translation(self, RSCRATCH[0], Value::RegisterPlusConstant64(dst, insn.off as i64, true), 1, AccessType::Store);
+                    emit_address_translation(self, Value::RegisterPlusConstant64(dst, insn.off as i64, true));
                     emit_store(self, OperandSize::S8, RSCRATCH[0], src);
                 },
                 ebpf::ST_H_REG  => {
-                    emit_address_translation(self, RSCRATCH[0], Value::RegisterPlusConstant64(dst, insn.off as i64, true), 2, AccessType::Store);
+                    emit_address_translation(self, Value::RegisterPlusConstant64(dst, insn.off as i64, true));
                     emit_store(self, OperandSize::S16, RSCRATCH[0], src);
                 },
                 ebpf::ST_W_REG  => {
-                    emit_address_translation(self, RSCRATCH[0], Value::RegisterPlusConstant64(dst, insn.off as i64, true), 4, AccessType::Store);
+                    emit_address_translation(self, Value::RegisterPlusConstant64(dst, insn.off as i64, true));
                     emit_store(self, OperandSize::S32, RSCRATCH[0], src);
                 },
                 ebpf::ST_DW_REG  => {
-                    emit_address_translation(self, RSCRATCH[0], Value::RegisterPlusConstant64(dst, insn.off as i64, true), 8, AccessType::Store);
+                    emit_address_translation(self, Value::RegisterPlusConstant64(dst, insn.off as i64, true));
                     emit_store(self, OperandSize::S64, RSCRATCH[0], src);
                 },
 
