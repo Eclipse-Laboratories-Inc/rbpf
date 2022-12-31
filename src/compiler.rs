@@ -638,6 +638,20 @@ fn emit_sub_imm(comp: &mut Compiler, size: OperandSize, dst: [Register; 2], imm:
 }
 
 #[inline]
+fn emit_mul(comp: &mut Compiler, size: OperandSize, src: [Register; 2], dst: [Register; 2]) {
+    emit_ins(comp, RiscVInstruction::mul(dst[0], src[0], dst[0]));
+    match size {
+        OperandSize::S32 => {
+            emit_riscv_li(comp, dst[1], 0);
+        }
+        OperandSize::S64 => {
+            panic!("unimplemented!");
+        }
+        _ => panic!("unsupported instruction!")
+    }
+}
+
+#[inline]
 fn emit_mov(comp: &mut Compiler, size: OperandSize, src: [Register; 2], dst: [Register; 2]) {
     emit_ins(comp, RiscVInstruction::mv(src[0], dst[0]));
     match size {
@@ -884,6 +898,7 @@ impl Compiler {
                 ebpf::ADD32_REG  => emit_add(self, OperandSize::S32, src, dst),
                 ebpf::SUB32_IMM  => emit_sub_imm(self, OperandSize::S32, dst, insn.imm),
                 ebpf::SUB32_REG  => emit_sub(self, OperandSize::S32, src, dst),
+                ebpf::MUL32_REG  => emit_mul(self, OperandSize::S32, src, dst),
 //              ebpf::MUL32_IMM | ebpf::DIV32_IMM | ebpf::SDIV32_IMM | ebpf::MOD32_IMM  =>
 //                  emit_muldivmod(self, insn.opc, dst, dst, Some(insn.imm)),
 //              ebpf::MUL32_REG | ebpf::DIV32_REG | ebpf::SDIV32_REG | ebpf::MOD32_REG  =>
@@ -1167,8 +1182,14 @@ impl Compiler {
 //      }
         // Store instruction_meter in RAX
 //      emit_ins(self, RiscVInstruction::mv(OperandSize::S64, ARGUMENT_REGISTERS[0], RAX));
-        // Restore stack pointer in case the BPF stack was used
+        // Restore stack pointer
         emit_ins(self, RiscVInstruction::addi(Register::T6, Register::SP, slot_on_environment_stack(self, EnvironmentStackSlot::LastSavedRegister)));
+        // Save BPF registers for use by the wrapper
+        emit_address_translation(self, Value::Constant64(0x200000000, false));
+        for reg in REGISTER_MAP.iter() {
+            emit_store(self, OperandSize::S64, RSCRATCH[0], *reg);
+            emit_ins(self, RiscVInstruction::addi(RSCRATCH[0], RSCRATCH[0], 8));
+        }
         // Restore registers
         for reg in CALLEE_SAVED_REGISTERS.iter().rev() {
             if *reg != Register::SP {

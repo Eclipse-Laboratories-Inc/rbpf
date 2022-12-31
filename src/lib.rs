@@ -4,6 +4,7 @@
 // Copyright 2016 6WIND S.A. <quentin.monnet@6wind.com>
 //      (Translation to Rust, MetaBuff/multiple classes addition, hashmaps for syscalls)
 // Copyright 2020 Solana Maintainers <maintainers@solana.com>
+// Copyright 2022 Eclipse Labs
 //
 // Licensed under the Apache License, Version 2.0 <http://www.apache.org/licenses/LICENSE-2.0> or
 // the MIT license <http://opensource.org/licenses/MIT>, at your option. This file may not be
