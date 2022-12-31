@@ -83,8 +83,4 @@ Here are the steps to follow to run an eBPF program with rbpf:
 
 ## License
 
-Following the effort of the Rust language project itself in order to ease
-integration with other projects, the rbpf crate is distributed under the terms
-of both the MIT license and the Apache License (Version 2.0).
-
-See [LICENSE-APACHE](LICENSE-APACHE) and [LICENSE-MIT](LICENSE-MIT) for details.
+This project is distributed under the Apache License (Version 2.0).
