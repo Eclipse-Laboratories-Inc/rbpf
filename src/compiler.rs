@@ -1283,7 +1283,6 @@ impl Compiler {
         emit_profile_instruction_count_finalize(self, false);
 //      emit_ins(self, RiscVInstruction::load(OperandSize::S64, Register::T6, R10, X86IndirectAccess::Offset(slot_on_environment_stack(self, EnvironmentStackSlot::OptRetValPtr))));
 //      emit_ins(self, RiscVInstruction::store(OperandSize::S64, REGISTER_MAP[0], R10, X86IndirectAccess::Offset(8))); // result.return_value = R0;
-        emit_load_immediate(self, OperandSize::S64, REGISTER_MAP[0], 0);
         emit_jump_to_anchor(self, Register::X0, ANCHOR_EPILOGUE);
 
         // Routine for syscall
