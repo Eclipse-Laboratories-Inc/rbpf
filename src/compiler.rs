@@ -493,7 +493,7 @@ fn emit_load_offset(comp: &mut Compiler, size: OperandSize, addr: Register, dst:
     }
     match size {
         OperandSize::S64 => emit_ins(comp, RiscVInstruction::lw(addr, dst[1], imm + 4)),
-        _ => emit_ins(comp, RiscVInstruction::lui(dst[1], 0)),
+        _ => emit_riscv_li(comp, dst[1], 0),
     }
 }
 
