@@ -350,4 +350,9 @@ impl RiscVInstruction {
     pub const fn nop() -> Self {
         Self::addi(Register::X0, Register::X0, 0)
     }
+
+    #[inline]
+    pub const fn not(source: Register, destination: Register) -> Self {
+        Self::xori(source, destination, -1)
+    }
 }

@@ -601,6 +601,7 @@ fn emit_sub(comp: &mut Compiler, size: OperandSize, src: [Register; 2], dst: [Re
             emit_riscv_li(comp, dst[1], 0);
         }
         OperandSize::S64 => {
+            //TODO
             panic!("unimplemented!");
         }
         _ => panic!("unsupported instruction!")
@@ -609,14 +610,28 @@ fn emit_sub(comp: &mut Compiler, size: OperandSize, src: [Register; 2], dst: [Re
 
 #[inline]
 fn emit_add_imm(comp: &mut Compiler, size: OperandSize, dst: [Register; 2], imm: i64) {
-    emit_riscv_li(comp, RSCRATCH2, imm as i32);
-    emit_ins(comp, RiscVInstruction::add(dst[0], RSCRATCH2, dst[0]));
     match size {
         OperandSize::S32 => {
+            emit_riscv_li(comp, RSCRATCH2, imm as i32);
+            emit_ins(comp, RiscVInstruction::add(dst[0], RSCRATCH2, dst[0]));
             emit_riscv_li(comp, dst[1], 0);
         }
         OperandSize::S64 => {
-            panic!("unimplemented!");
+            let scratch0 = if dst[0] == RSCRATCH[0] || dst[1] == RSCRATCH[0] {
+                Register::T3
+            } else {
+                RSCRATCH[0]
+            };
+            let scratch1 = if dst[0] == RSCRATCH[1] || dst[1] == RSCRATCH[1] {
+                Register::T4
+            } else {
+                RSCRATCH[1]
+            };
+            let scratch = [scratch0, scratch1];
+            emit_push(comp, scratch);
+            emit_load_immediate(comp, size, scratch, imm);
+            emit_add(comp, size, scratch, dst);
+            emit_pop(comp, scratch);
         }
         _ => panic!("unsupported instruction!")
     }
@@ -631,6 +646,7 @@ fn emit_sub_imm(comp: &mut Compiler, size: OperandSize, dst: [Register; 2], imm:
             emit_riscv_li(comp, dst[1], 0);
         }
         OperandSize::S64 => {
+            //TODO
             panic!("unimplemented!");
         }
         _ => panic!("unsupported instruction!")
@@ -645,7 +661,202 @@ fn emit_mul(comp: &mut Compiler, size: OperandSize, src: [Register; 2], dst: [Re
             emit_riscv_li(comp, dst[1], 0);
         }
         OperandSize::S64 => {
+            //TODO
             panic!("unimplemented!");
+        }
+        _ => panic!("unsupported instruction!")
+    }
+}
+
+#[inline]
+fn emit_mul_imm(comp: &mut Compiler, size: OperandSize, dst: [Register; 2], imm: i64) {
+    emit_riscv_li(comp, RSCRATCH2, imm as i32);
+    emit_ins(comp, RiscVInstruction::mul(dst[0], RSCRATCH2, dst[0]));
+    match size {
+        OperandSize::S32 => {
+            emit_riscv_li(comp, dst[1], 0);
+        }
+        OperandSize::S64 => {
+            //TODO
+            panic!("unimplemented!");
+        }
+        _ => panic!("unsupported instruction!")
+    }
+}
+
+#[inline]
+fn emit_div(comp: &mut Compiler, size: OperandSize, src: [Register; 2], dst: [Register; 2]) {
+    match size {
+        OperandSize::S32 => {
+            emit_ins(comp, RiscVInstruction::divu(dst[0], src[0], dst[0]));
+            emit_riscv_li(comp, dst[1], 0);
+        }
+        OperandSize::S64 => {
+            //TODO
+            panic!("unimplemented!");
+        }
+        _ => panic!("unsupported instruction!")
+    }
+}
+
+#[inline]
+fn emit_sdiv(comp: &mut Compiler, size: OperandSize, src: [Register; 2], dst: [Register; 2]) {
+    match size {
+        OperandSize::S32 => {
+            emit_ins(comp, RiscVInstruction::div(dst[0], src[0], dst[0]));
+            emit_riscv_li(comp, dst[1], 0);
+        }
+        OperandSize::S64 => {
+            //TODO
+            panic!("unimplemented!");
+        }
+        _ => panic!("unsupported instruction!")
+    }
+}
+
+#[inline]
+fn emit_mod(comp: &mut Compiler, size: OperandSize, src: [Register; 2], dst: [Register; 2]) {
+    match size {
+        OperandSize::S32 => {
+            emit_ins(comp, RiscVInstruction::remu(dst[0], src[0], dst[0]));
+            emit_riscv_li(comp, dst[1], 0);
+        }
+        OperandSize::S64 => {
+            //TODO
+            panic!("unimplemented!");
+        }
+        _ => panic!("unsupported instruction!")
+    }
+}
+
+#[inline]
+fn emit_or(comp: &mut Compiler, size: OperandSize, src: [Register; 2], dst: [Register; 2]) {
+    emit_ins(comp, RiscVInstruction::or(src[0], dst[0], dst[0]));
+    match size {
+        OperandSize::S32 => {
+            emit_riscv_li(comp, dst[1], 0);
+        }
+        OperandSize::S64 => {
+            emit_ins(comp, RiscVInstruction::or(src[1], dst[1], dst[1]));
+        }
+        _ => panic!("unsupported instruction!")
+    }
+}
+
+#[inline]
+fn emit_and(comp: &mut Compiler, size: OperandSize, src: [Register; 2], dst: [Register; 2]) {
+    emit_ins(comp, RiscVInstruction::and(src[0], dst[0], dst[0]));
+    match size {
+        OperandSize::S32 => {
+            emit_riscv_li(comp, dst[1], 0);
+        }
+        OperandSize::S64 => {
+            emit_ins(comp, RiscVInstruction::and(src[1], dst[1], dst[1]));
+        }
+        _ => panic!("unsupported instruction!")
+    }
+}
+
+#[inline]
+fn emit_lsh(comp: &mut Compiler, size: OperandSize, src: [Register; 2], dst: [Register; 2]) {
+    match size {
+        OperandSize::S32 => {
+            emit_ins(comp, RiscVInstruction::sll(dst[0], src[0], dst[0]));
+            emit_riscv_li(comp, dst[1], 0);
+        }
+        OperandSize::S64 => {
+            //TODO
+            panic!("unimplemented!");
+        }
+        _ => panic!("unsupported instruction!")
+    }
+}
+
+#[inline]
+fn emit_rsh(comp: &mut Compiler, size: OperandSize, src: [Register; 2], dst: [Register; 2]) {
+    match size {
+        OperandSize::S32 => {
+            emit_ins(comp, RiscVInstruction::srl(dst[0], src[0], dst[0]));
+            emit_riscv_li(comp, dst[1], 0);
+        }
+        OperandSize::S64 => {
+            //TODO
+            panic!("unimplemented!");
+        }
+        _ => panic!("unsupported instruction!")
+    }
+}
+
+#[inline]
+fn emit_xor(comp: &mut Compiler, size: OperandSize, src: [Register; 2], dst: [Register; 2]) {
+    emit_ins(comp, RiscVInstruction::xor(src[0], dst[0], dst[0]));
+    match size {
+        OperandSize::S32 => {
+            emit_riscv_li(comp, dst[1], 0);
+        }
+        OperandSize::S64 => {
+            emit_ins(comp, RiscVInstruction::xor(src[1], dst[1], dst[1]));
+        }
+        _ => panic!("unsupported instruction!")
+    }
+}
+
+#[inline]
+fn emit_arsh(comp: &mut Compiler, size: OperandSize, src: [Register; 2], dst: [Register; 2]) {
+    match size {
+        OperandSize::S32 => {
+            emit_ins(comp, RiscVInstruction::sra(dst[0], src[0], dst[0]));
+            emit_riscv_li(comp, dst[1], 0);
+        }
+        OperandSize::S64 => {
+            //TODO
+            panic!("unimplemented!");
+        }
+        _ => panic!("unsupported instruction!")
+    }
+}
+
+macro_rules! make_imm {
+    ($name:ident, $name_imm:ident) => {
+        #[inline]
+        fn $name_imm(comp: &mut Compiler, size: OperandSize, dst: [Register; 2], imm: i64) {
+            let scratch0 = if dst[0] == RSCRATCH[0] || dst[1] == RSCRATCH[0] {
+                Register::T3
+            } else {
+                RSCRATCH[0]
+            };
+            let scratch1 = if dst[0] == RSCRATCH[1] || dst[1] == RSCRATCH[1] {
+                Register::T4
+            } else {
+                RSCRATCH[1]
+            };
+            let scratch = [scratch0, scratch1];
+            emit_push(comp, scratch);
+            emit_load_immediate(comp, size, scratch, imm);
+            $name(comp, size, scratch, dst);
+            emit_pop(comp, scratch);
+        }
+    }
+}
+make_imm!(emit_div, emit_div_imm);
+make_imm!(emit_sdiv, emit_sdiv_imm);
+make_imm!(emit_mod, emit_mod_imm);
+make_imm!(emit_or, emit_or_imm);
+make_imm!(emit_and, emit_and_imm);
+make_imm!(emit_lsh, emit_lsh_imm);
+make_imm!(emit_rsh, emit_rsh_imm);
+make_imm!(emit_xor, emit_xor_imm);
+make_imm!(emit_arsh, emit_arsh_imm);
+
+#[inline]
+fn emit_neg(comp: &mut Compiler, size: OperandSize, dst: [Register; 2]) {
+    emit_ins(comp, RiscVInstruction::not(dst[0], dst[0]));
+    match size {
+        OperandSize::S32 => {
+            emit_riscv_li(comp, dst[1], 0);
+        }
+        OperandSize::S64 => {
+            emit_ins(comp, RiscVInstruction::not(dst[1], dst[1]));
         }
         _ => panic!("unsupported instruction!")
     }
@@ -894,44 +1105,50 @@ impl Compiler {
                 },
 
                 // BPF_ALU class
-                ebpf::ADD32_IMM  => emit_add_imm(self, OperandSize::S32, dst, insn.imm),
                 ebpf::ADD32_REG  => emit_add(self, OperandSize::S32, src, dst),
-                ebpf::SUB32_IMM  => emit_sub_imm(self, OperandSize::S32, dst, insn.imm),
                 ebpf::SUB32_REG  => emit_sub(self, OperandSize::S32, src, dst),
                 ebpf::MUL32_REG  => emit_mul(self, OperandSize::S32, src, dst),
-//              ebpf::MUL32_IMM | ebpf::DIV32_IMM | ebpf::SDIV32_IMM | ebpf::MOD32_IMM  =>
-//                  emit_muldivmod(self, insn.opc, dst, dst, Some(insn.imm)),
-//              ebpf::MUL32_REG | ebpf::DIV32_REG | ebpf::SDIV32_REG | ebpf::MOD32_REG  =>
-//                  emit_muldivmod(self, insn.opc, src, dst, None),
-//              ebpf::OR32_IMM   => emit_sanitized_alu(self, OperandSize::S32, 0x09, 1, dst, insn.imm),
-//              ebpf::OR32_REG   => emit_ins(self, RiscVInstruction::alu(OperandSize::S32, 0x09, src, dst, 0, None)),
-//              ebpf::AND32_IMM  => emit_sanitized_alu(self, OperandSize::S32, 0x21, 4, dst, insn.imm),
-//              ebpf::AND32_REG  => emit_ins(self, RiscVInstruction::alu(OperandSize::S32, 0x21, src, dst, 0, None)),
-//              ebpf::LSH32_IMM  => emit_shift(self, OperandSize::S32, 4, RSCRATCH, dst, Some(insn.imm)),
-//              ebpf::LSH32_REG  => emit_shift(self, OperandSize::S32, 4, src, dst, None),
-//              ebpf::RSH32_IMM  => emit_shift(self, OperandSize::S32, 5, RSCRATCH, dst, Some(insn.imm)),
-//              ebpf::RSH32_REG  => emit_shift(self, OperandSize::S32, 5, src, dst, None),
-//              ebpf::NEG32      => emit_ins(self, RiscVInstruction::alu(OperandSize::S32, 0xf7, 3, dst, 0, None)),
-//              ebpf::XOR32_IMM  => emit_sanitized_alu(self, OperandSize::S32, 0x31, 6, dst, insn.imm),
-//              ebpf::XOR32_REG  => emit_ins(self, RiscVInstruction::alu(OperandSize::S32, 0x31, src, dst, 0, None)),
-//              ebpf::MOV32_IMM  => emit_load_immediate(self, OperandSize::S32, dst, insn.imm),
-//              ebpf::MOV32_REG  => emit_mov(self, OperandSize::S32, src, dst),
-//              ebpf::ARSH32_IMM => emit_shift(self, OperandSize::S32, 7, RSCRATCH, dst, Some(insn.imm)),
-//              ebpf::ARSH32_REG => emit_shift(self, OperandSize::S32, 7, src, dst, None),
-//              ebpf::LE         => {
-//                  match insn.imm {
-//                      16 => {
-//                          emit_ins(self, RiscVInstruction::alu(OperandSize::S32, 0x81, 4, dst, 0xffff, None)); // Mask to 16 bit
-//                      }
-//                      32 => {
-//                          emit_ins(self, RiscVInstruction::alu(OperandSize::S32, 0x81, 4, dst, -1, None)); // Mask to 32 bit
-//                      }
-//                      64 => {}
-//                      _ => {
-//                          return Err(EbpfError::InvalidInstruction(self.pc + ebpf::ELF_INSN_DUMP_OFFSET));
-//                      }
-//                  }
-//              },
+                ebpf::DIV32_REG  => emit_div(self, OperandSize::S32, src, dst),
+                ebpf::SDIV32_REG => emit_sdiv(self, OperandSize::S32, src, dst),
+                ebpf::MOD32_REG  => emit_mod(self, OperandSize::S32, src, dst),
+                ebpf::OR32_REG   => emit_or(self, OperandSize::S32, src, dst),
+                ebpf::AND32_REG  => emit_and(self, OperandSize::S32, src, dst),
+                ebpf::LSH32_REG  => emit_lsh(self, OperandSize::S32, src, dst),
+                ebpf::RSH32_REG  => emit_rsh(self, OperandSize::S32, src, dst),
+                ebpf::NEG32      => emit_neg(self, OperandSize::S32, dst),
+                ebpf::XOR32_REG  => emit_xor(self, OperandSize::S32, src, dst),
+                ebpf::MOV32_REG  => emit_mov(self, OperandSize::S32, src, dst),
+                ebpf::ARSH32_REG => emit_arsh(self, OperandSize::S32, src, dst),
+                ebpf::ADD32_IMM  => emit_add_imm(self, OperandSize::S32, dst, insn.imm),
+                ebpf::SUB32_IMM  => emit_sub_imm(self, OperandSize::S32, dst, insn.imm),
+                ebpf::MUL32_IMM  => emit_mul_imm(self, OperandSize::S32, dst, insn.imm),
+                ebpf::DIV32_IMM  => emit_div_imm(self, OperandSize::S32, dst, insn.imm),
+                ebpf::SDIV32_IMM => emit_sdiv_imm(self, OperandSize::S32, dst, insn.imm),
+                ebpf::MOD32_IMM  => emit_mod_imm(self, OperandSize::S32, dst, insn.imm),
+                ebpf::OR32_IMM   => emit_or_imm(self, OperandSize::S32, dst, insn.imm),
+                ebpf::AND32_IMM  => emit_and_imm(self, OperandSize::S32, dst, insn.imm),
+                ebpf::LSH32_IMM  => emit_lsh_imm(self, OperandSize::S32, dst, insn.imm),
+                ebpf::RSH32_IMM  => emit_rsh_imm(self, OperandSize::S32, dst, insn.imm),
+                ebpf::XOR32_IMM  => emit_xor_imm(self, OperandSize::S32, dst, insn.imm),
+                ebpf::MOV32_IMM  => emit_load_immediate(self, OperandSize::S32, dst, insn.imm),
+                ebpf::ARSH32_IMM => emit_arsh_imm(self, OperandSize::S32, dst, insn.imm),
+                ebpf::LE         => {
+                    match insn.imm {
+                        16 => {
+                            // Mask to 16 bit
+                            emit_riscv_li(self, RSCRATCH[0], 0xffff);
+                            emit_and(self, OperandSize::S32, [RSCRATCH[0], Register::X0], dst);
+                        }
+                        32 => {
+                            // Mask to 32 bit
+                            emit_riscv_li(self, dst[1], 0);
+                        }
+                        64 => {}
+                        _ => {
+                            return Err(EbpfError::InvalidInstruction(self.pc + ebpf::ELF_INSN_DUMP_OFFSET));
+                        }
+                    }
+                },
 //              ebpf::BE         => {
 //                  match insn.imm {
 //                      16 => {
@@ -947,35 +1164,33 @@ impl Compiler {
 //              },
 
                 // BPF_ALU64 class
-//              ebpf::ADD64_IMM  => emit_sanitized_alu(self, OperandSize::S64, 0x01, 0, dst, insn.imm),
-//              ebpf::ADD64_REG  => emit_ins(self, RiscVInstruction::alu(OperandSize::S64, 0x01, src, dst, 0, None)),
-//              ebpf::SUB64_IMM  => emit_sanitized_alu(self, OperandSize::S64, 0x29, 5, dst, insn.imm),
-//              ebpf::SUB64_REG  => emit_ins(self, RiscVInstruction::alu(OperandSize::S64, 0x29, src, dst, 0, None)),
-//              ebpf::MUL64_IMM | ebpf::DIV64_IMM | ebpf::SDIV64_IMM | ebpf::MOD64_IMM  =>
-//                  emit_muldivmod(self, insn.opc, dst, dst, Some(insn.imm)),
-//              ebpf::MUL64_REG | ebpf::DIV64_REG | ebpf::SDIV64_REG | ebpf::MOD64_REG  =>
-//                  emit_muldivmod(self, insn.opc, src, dst, None),
-//              ebpf::OR64_IMM   => emit_sanitized_alu(self, OperandSize::S64, 0x09, 1, dst, insn.imm),
-//              ebpf::OR64_REG   => emit_ins(self, RiscVInstruction::alu(OperandSize::S64, 0x09, src, dst, 0, None)),
-//              ebpf::AND64_IMM  => emit_sanitized_alu(self, OperandSize::S64, 0x21, 4, dst, insn.imm),
-//              ebpf::AND64_REG  => emit_ins(self, RiscVInstruction::alu(OperandSize::S64, 0x21, src, dst, 0, None)),
-//              ebpf::LSH64_IMM  => emit_shift(self, OperandSize::S64, 4, RSCRATCH, dst, Some(insn.imm)),
-//              ebpf::LSH64_REG  => emit_shift(self, OperandSize::S64, 4, src, dst, None),
-//              ebpf::RSH64_IMM  => emit_shift(self, OperandSize::S64, 5, RSCRATCH, dst, Some(insn.imm)),
-//              ebpf::RSH64_REG  => emit_shift(self, OperandSize::S64, 5, src, dst, None),
-//              ebpf::NEG64      => emit_ins(self, RiscVInstruction::alu(OperandSize::S64, 0xf7, 3, dst, 0, None)),
-//              ebpf::XOR64_IMM  => emit_sanitized_alu(self, OperandSize::S64, 0x31, 6, dst, insn.imm),
-//              ebpf::XOR64_REG  => emit_ins(self, RiscVInstruction::alu(OperandSize::S64, 0x31, src, dst, 0, None)),
-//              ebpf::MOV64_IMM  => {
-//                  if should_sanitize_constant(self, insn.imm) {
-//                      emit_sanitized_load_immediate(self, OperandSize::S64, dst, insn.imm);
-//                  } else {
-//                      emit_load_immediate(self, OperandSize::S64, dst, insn.imm);
-//                  }
-//              }
-//              ebpf::MOV64_REG  => emit_ins(self, RiscVInstruction::mov(OperandSize::S64, src, dst)),
-//              ebpf::ARSH64_IMM => emit_shift(self, OperandSize::S64, 7, RSCRATCH, dst, Some(insn.imm)),
-//              ebpf::ARSH64_REG => emit_shift(self, OperandSize::S64, 7, src, dst, None),
+                ebpf::ADD64_REG  => emit_add(self, OperandSize::S64, src, dst),
+                ebpf::SUB64_REG  => emit_sub(self, OperandSize::S64, src, dst),
+                ebpf::MUL64_REG  => emit_mul(self, OperandSize::S64, src, dst),
+                ebpf::DIV64_REG  => emit_div(self, OperandSize::S64, src, dst),
+                ebpf::SDIV64_REG => emit_sdiv(self, OperandSize::S64, src, dst),
+                ebpf::MOD64_REG  => emit_mod(self, OperandSize::S64, src, dst),
+                ebpf::OR64_REG   => emit_or(self, OperandSize::S64, src, dst),
+                ebpf::AND64_REG  => emit_and(self, OperandSize::S64, src, dst),
+                ebpf::LSH64_REG  => emit_lsh(self, OperandSize::S64, src, dst),
+                ebpf::RSH64_REG  => emit_rsh(self, OperandSize::S64, src, dst),
+                ebpf::NEG64      => emit_neg(self, OperandSize::S64, dst),
+                ebpf::XOR64_REG  => emit_xor(self, OperandSize::S64, src, dst),
+                ebpf::MOV64_REG  => emit_mov(self, OperandSize::S64, src, dst),
+                ebpf::ARSH64_REG => emit_arsh(self, OperandSize::S64, src, dst),
+                ebpf::ADD64_IMM  => emit_add_imm(self, OperandSize::S64, dst, insn.imm),
+                ebpf::SUB64_IMM  => emit_sub_imm(self, OperandSize::S64, dst, insn.imm),
+                ebpf::MUL64_IMM  => emit_mul_imm(self, OperandSize::S64, dst, insn.imm),
+                ebpf::DIV64_IMM  => emit_div_imm(self, OperandSize::S64, dst, insn.imm),
+                ebpf::SDIV64_IMM => emit_sdiv_imm(self, OperandSize::S64, dst, insn.imm),
+                ebpf::MOD64_IMM  => emit_mod_imm(self, OperandSize::S64, dst, insn.imm),
+                ebpf::OR64_IMM   => emit_or_imm(self, OperandSize::S64, dst, insn.imm),
+                ebpf::AND64_IMM  => emit_and_imm(self, OperandSize::S64, dst, insn.imm),
+                ebpf::LSH64_IMM  => emit_lsh_imm(self, OperandSize::S64, dst, insn.imm),
+                ebpf::RSH64_IMM  => emit_rsh_imm(self, OperandSize::S64, dst, insn.imm),
+                ebpf::XOR64_IMM  => emit_xor_imm(self, OperandSize::S64, dst, insn.imm),
+                ebpf::MOV64_IMM  => emit_load_immediate(self, OperandSize::S64, dst, insn.imm),
+                ebpf::ARSH64_IMM => emit_arsh_imm(self, OperandSize::S64, dst, insn.imm),
 
                 // BPF_JMP class
                 ebpf::JA         => {
