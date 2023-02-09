@@ -325,6 +325,9 @@ impl RiscVInstruction {
     define_instruction!(sw,     S, 0b0100011, 0b010);
     define_instruction!(xor,    R, 0b0110011, 0b100, 0b0000000);
     define_instruction!(xori,   I, 0b0010011, 0b100);
+    define_instruction!(_slli,  I, 0b0010011, 0b001);
+    define_instruction!(_srli,  I, 0b0010011, 0b101);
+    define_instruction!(_srai,  I, 0b0010011, 0b101);
 
     // Exceptional instructions
 
@@ -335,6 +338,21 @@ impl RiscVInstruction {
             opcode: 0b1110011,
             ..Self::DEFAULT
         }
+    }
+
+    #[inline]
+    pub const fn slli(source: Register, destination: Register, immediate: i32) -> Self {
+        Self::_slli(source, destination, immediate & 0b11111)
+    }
+
+    #[inline]
+    pub const fn srli(source: Register, destination: Register, immediate: i32) -> Self {
+        Self::_srli(source, destination, immediate & 0b11111)
+    }
+
+    #[inline]
+    pub const fn srai(source: Register, destination: Register, immediate: i32) -> Self {
+        Self::_srai(source, destination, (immediate & 0b11111) | (1 << 10))
     }
 
     // Pseudo-instructions
@@ -354,5 +372,25 @@ impl RiscVInstruction {
     #[inline]
     pub const fn not(source: Register, destination: Register) -> Self {
         Self::xori(source, destination, -1)
+    }
+
+    #[inline]
+    pub const fn bgt(source1: Register, source2: Register, immediate: i32) -> Self {
+        Self::blt(source2, source1, immediate)
+    }
+
+    #[inline]
+    pub const fn bgtu(source1: Register, source2: Register, immediate: i32) -> Self {
+        Self::bltu(source2, source1, immediate)
+    }
+
+    #[inline]
+    pub const fn ble(source1: Register, source2: Register, immediate: i32) -> Self {
+        Self::bge(source2, source1, immediate)
+    }
+
+    #[inline]
+    pub const fn bleu(source1: Register, source2: Register, immediate: i32) -> Self {
+        Self::bgeu(source2, source1, immediate)
     }
 }

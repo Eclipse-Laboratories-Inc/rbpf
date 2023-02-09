@@ -416,6 +416,17 @@ fn emit_jump_to_pc(comp: &mut Compiler, return_reg: Register, target_pc: usize) 
 }
 
 #[inline]
+fn emit_long_jump_to_anchor(comp: &mut Compiler, return_reg: Register, anchor: usize) {
+    emit_long_jump(comp, return_reg, comp.relative_to_anchor(anchor));
+}
+
+#[inline]
+fn emit_long_jump_to_pc(comp: &mut Compiler, return_reg: Register, target_pc: usize) {
+    let offset = comp.relative_to_target_pc(target_pc).unwrap_or(0);
+    emit_long_jump(comp, return_reg, offset);
+}
+
+#[inline]
 fn emit_jump(comp: &mut Compiler, return_reg: Register, offset: i32) {
     assert!(offset % 4 == 0);
     // check if the offset is the sign extension of its lower 20 bits
@@ -586,8 +597,8 @@ fn emit_add(comp: &mut Compiler, size: OperandSize, src: [Register; 2], dst: [Re
         }
         OperandSize::S64 => {
             emit_ins(comp, RiscVInstruction::sltu(dst[0], src[0], RSCRATCH2));
-            emit_ins(comp, RiscVInstruction::add(dst[1], RSCRATCH2, dst[1]));
             emit_ins(comp, RiscVInstruction::add(dst[1], src[1], dst[1]));
+            emit_ins(comp, RiscVInstruction::add(dst[1], RSCRATCH2, dst[1]));
         }
         _ => panic!("unsupported instruction!")
     }
@@ -595,59 +606,17 @@ fn emit_add(comp: &mut Compiler, size: OperandSize, src: [Register; 2], dst: [Re
 
 #[inline]
 fn emit_sub(comp: &mut Compiler, size: OperandSize, src: [Register; 2], dst: [Register; 2]) {
-    emit_ins(comp, RiscVInstruction::sub(dst[0], src[0], dst[0]));
     match size {
         OperandSize::S32 => {
+            emit_ins(comp, RiscVInstruction::sub(dst[0], src[0], dst[0]));
             emit_riscv_li(comp, dst[1], 0);
         }
         OperandSize::S64 => {
-            //TODO
-            panic!("unimplemented!");
-        }
-        _ => panic!("unsupported instruction!")
-    }
-}
-
-#[inline]
-fn emit_add_imm(comp: &mut Compiler, size: OperandSize, dst: [Register; 2], imm: i64) {
-    match size {
-        OperandSize::S32 => {
-            emit_riscv_li(comp, RSCRATCH2, imm as i32);
-            emit_ins(comp, RiscVInstruction::add(dst[0], RSCRATCH2, dst[0]));
-            emit_riscv_li(comp, dst[1], 0);
-        }
-        OperandSize::S64 => {
-            let scratch0 = if dst[0] == RSCRATCH[0] || dst[1] == RSCRATCH[0] {
-                Register::T3
-            } else {
-                RSCRATCH[0]
-            };
-            let scratch1 = if dst[0] == RSCRATCH[1] || dst[1] == RSCRATCH[1] {
-                Register::T4
-            } else {
-                RSCRATCH[1]
-            };
-            let scratch = [scratch0, scratch1];
-            emit_push(comp, scratch);
-            emit_load_immediate(comp, size, scratch, imm);
-            emit_add(comp, size, scratch, dst);
-            emit_pop(comp, scratch);
-        }
-        _ => panic!("unsupported instruction!")
-    }
-}
-
-#[inline]
-fn emit_sub_imm(comp: &mut Compiler, size: OperandSize, dst: [Register; 2], imm: i64) {
-    emit_riscv_li(comp, RSCRATCH2, imm as i32);
-    emit_ins(comp, RiscVInstruction::sub(dst[0], RSCRATCH2, dst[0]));
-    match size {
-        OperandSize::S32 => {
-            emit_riscv_li(comp, dst[1], 0);
-        }
-        OperandSize::S64 => {
-            //TODO
-            panic!("unimplemented!");
+            emit_ins(comp, RiscVInstruction::mv(dst[0], RSCRATCH2));
+            emit_ins(comp, RiscVInstruction::sub(dst[0], src[0], dst[0]));
+            emit_ins(comp, RiscVInstruction::sltu(RSCRATCH2, dst[0], RSCRATCH2));
+            emit_ins(comp, RiscVInstruction::sub(dst[1], src[1], dst[1]));
+            emit_ins(comp, RiscVInstruction::sub(dst[1], RSCRATCH2, dst[1]));
         }
         _ => panic!("unsupported instruction!")
     }
@@ -661,24 +630,12 @@ fn emit_mul(comp: &mut Compiler, size: OperandSize, src: [Register; 2], dst: [Re
             emit_riscv_li(comp, dst[1], 0);
         }
         OperandSize::S64 => {
-            //TODO
-            panic!("unimplemented!");
-        }
-        _ => panic!("unsupported instruction!")
-    }
-}
-
-#[inline]
-fn emit_mul_imm(comp: &mut Compiler, size: OperandSize, dst: [Register; 2], imm: i64) {
-    emit_riscv_li(comp, RSCRATCH2, imm as i32);
-    emit_ins(comp, RiscVInstruction::mul(dst[0], RSCRATCH2, dst[0]));
-    match size {
-        OperandSize::S32 => {
-            emit_riscv_li(comp, dst[1], 0);
-        }
-        OperandSize::S64 => {
-            //TODO
-            panic!("unimplemented!");
+            emit_ins(comp, RiscVInstruction::mul(dst[1], src[0], dst[1]));
+            emit_ins(comp, RiscVInstruction::mul(dst[0], src[1], RSCRATCH2));
+            emit_ins(comp, RiscVInstruction::add(dst[1], RSCRATCH2, dst[1]));
+            emit_ins(comp, RiscVInstruction::mulhu(dst[0], src[0], RSCRATCH2));
+            emit_ins(comp, RiscVInstruction::mul(dst[0], src[0], dst[0]));
+            emit_ins(comp, RiscVInstruction::add(dst[1], RSCRATCH2, dst[1]));
         }
         _ => panic!("unsupported instruction!")
     }
@@ -816,37 +773,49 @@ fn emit_arsh(comp: &mut Compiler, size: OperandSize, src: [Register; 2], dst: [R
     }
 }
 
-macro_rules! make_imm {
+macro_rules! make_arith_imm {
     ($name:ident, $name_imm:ident) => {
         #[inline]
         fn $name_imm(comp: &mut Compiler, size: OperandSize, dst: [Register; 2], imm: i64) {
-            let scratch0 = if dst[0] == RSCRATCH[0] || dst[1] == RSCRATCH[0] {
-                Register::T3
-            } else {
-                RSCRATCH[0]
-            };
-            let scratch1 = if dst[0] == RSCRATCH[1] || dst[1] == RSCRATCH[1] {
-                Register::T4
-            } else {
-                RSCRATCH[1]
-            };
-            let scratch = [scratch0, scratch1];
-            emit_push(comp, scratch);
-            emit_load_immediate(comp, size, scratch, imm);
-            $name(comp, size, scratch, dst);
-            emit_pop(comp, scratch);
+            match size {
+                OperandSize::S32 => {
+                    emit_riscv_li(comp, RSCRATCH2, imm as i32);
+                    $name(comp, size, [RSCRATCH2, Register::X0], dst);
+                },
+                OperandSize::S64 => {
+                    let scratch0 = if dst[0] == RSCRATCH[0] || dst[1] == RSCRATCH[0] {
+                        Register::T3
+                    } else {
+                        RSCRATCH[0]
+                    };
+                    let scratch1 = if dst[0] == RSCRATCH[1] || dst[1] == RSCRATCH[1] {
+                        Register::T4
+                    } else {
+                        RSCRATCH[1]
+                    };
+                    let scratch = [scratch0, scratch1];
+                    emit_push(comp, scratch);
+                    emit_load_immediate(comp, size, scratch, imm);
+                    $name(comp, size, scratch, dst);
+                    emit_pop(comp, scratch);
+                }
+                _ => panic!("unsupported instruction!")
+            }
         }
     }
 }
-make_imm!(emit_div, emit_div_imm);
-make_imm!(emit_sdiv, emit_sdiv_imm);
-make_imm!(emit_mod, emit_mod_imm);
-make_imm!(emit_or, emit_or_imm);
-make_imm!(emit_and, emit_and_imm);
-make_imm!(emit_lsh, emit_lsh_imm);
-make_imm!(emit_rsh, emit_rsh_imm);
-make_imm!(emit_xor, emit_xor_imm);
-make_imm!(emit_arsh, emit_arsh_imm);
+make_arith_imm!(emit_add, emit_add_imm);
+make_arith_imm!(emit_sub, emit_sub_imm);
+make_arith_imm!(emit_mul, emit_mul_imm);
+make_arith_imm!(emit_div, emit_div_imm);
+make_arith_imm!(emit_sdiv, emit_sdiv_imm);
+make_arith_imm!(emit_mod, emit_mod_imm);
+make_arith_imm!(emit_or, emit_or_imm);
+make_arith_imm!(emit_and, emit_and_imm);
+make_arith_imm!(emit_lsh, emit_lsh_imm);
+make_arith_imm!(emit_rsh, emit_rsh_imm);
+make_arith_imm!(emit_xor, emit_xor_imm);
+make_arith_imm!(emit_arsh, emit_arsh_imm);
 
 #[inline]
 fn emit_neg(comp: &mut Compiler, size: OperandSize, dst: [Register; 2]) {
@@ -875,6 +844,103 @@ fn emit_mov(comp: &mut Compiler, size: OperandSize, src: [Register; 2], dst: [Re
         _ => panic!()
     }
 }
+
+#[inline]
+fn emit_jeq(comp: &mut Compiler, src: [Register; 2], dst: [Register; 2], target_pc: usize) {
+    emit_ins(comp, RiscVInstruction::bne(src[0], dst[0], 4 * 4));
+    emit_ins(comp, RiscVInstruction::bne(src[1], dst[1], 4 * 3));
+    emit_long_jump_to_pc(comp, Register::X0, target_pc); // 2 instructions
+}
+
+#[inline]
+fn emit_jgt(comp: &mut Compiler, src: [Register; 2], dst: [Register; 2], target_pc: usize) {
+    emit_ins(comp, RiscVInstruction::bltu(src[1], dst[1], 4 * 5));
+    emit_ins(comp, RiscVInstruction::bne(src[1], dst[1], 4 * 2));
+    emit_ins(comp, RiscVInstruction::bleu(src[0], dst[0], 4 * 3));
+    emit_long_jump_to_pc(comp, Register::X0, target_pc); // 2 instructions
+}
+
+#[inline]
+fn emit_jge(comp: &mut Compiler, src: [Register; 2], dst: [Register; 2], target_pc: usize) {
+    emit_ins(comp, RiscVInstruction::bltu(src[1], dst[1], 4 * 5));
+    emit_ins(comp, RiscVInstruction::bne(src[1], dst[1], 4 * 2));
+    emit_ins(comp, RiscVInstruction::bltu(src[0], dst[0], 4 * 3));
+    emit_long_jump_to_pc(comp, Register::X0, target_pc); // 2 instructions
+}
+
+#[inline]
+fn emit_jlt(comp: &mut Compiler, src: [Register; 2], dst: [Register; 2], target_pc: usize) {
+    emit_jgt(comp, dst, src, target_pc);
+}
+
+#[inline]
+fn emit_jle(comp: &mut Compiler, src: [Register; 2], dst: [Register; 2], target_pc: usize) {
+    emit_jge(comp, dst, src, target_pc);
+}
+
+#[inline]
+fn emit_jset(comp: &mut Compiler, src: [Register; 2], dst: [Register; 2], target_pc: usize) {
+    emit_ins(comp, RiscVInstruction::and(src[0], dst[0], RSCRATCH2));
+    emit_ins(comp, RiscVInstruction::bne(RSCRATCH2, Register::X0, 4 * 3));
+    emit_ins(comp, RiscVInstruction::and(src[1], dst[1], RSCRATCH2));
+    emit_ins(comp, RiscVInstruction::beq(RSCRATCH2, Register::X0, 4 * 3));
+    emit_long_jump_to_pc(comp, Register::X0, target_pc); // 2 instructions
+}
+
+#[inline]
+fn emit_jne(comp: &mut Compiler, src: [Register; 2], dst: [Register; 2], target_pc: usize) {
+    emit_ins(comp, RiscVInstruction::bne(src[0], dst[0], 4 * 2));
+    emit_ins(comp, RiscVInstruction::beq(src[1], dst[1], 4 * 3));
+    emit_long_jump_to_pc(comp, Register::X0, target_pc); // 2 instructions
+}
+
+#[inline]
+fn emit_jsgt(comp: &mut Compiler, src: [Register; 2], dst: [Register; 2], target_pc: usize) {
+    emit_ins(comp, RiscVInstruction::blt(src[1], dst[1], 4 * 5));
+    emit_ins(comp, RiscVInstruction::bne(src[1], dst[1], 4 * 2));
+    emit_ins(comp, RiscVInstruction::bleu(src[0], dst[0], 4 * 3));
+    emit_long_jump_to_pc(comp, Register::X0, target_pc); // 2 instructions
+}
+
+#[inline]
+fn emit_jsge(comp: &mut Compiler, src: [Register; 2], dst: [Register; 2], target_pc: usize) {
+    emit_ins(comp, RiscVInstruction::blt(src[1], dst[1], 4 * 5));
+    emit_ins(comp, RiscVInstruction::bne(src[1], dst[1], 4 * 2));
+    emit_ins(comp, RiscVInstruction::bltu(src[0], dst[0], 4 * 3));
+    emit_long_jump_to_pc(comp, Register::X0, target_pc); // 2 instructions
+}
+
+#[inline]
+fn emit_jslt(comp: &mut Compiler, src: [Register; 2], dst: [Register; 2], target_pc: usize) {
+    emit_jsgt(comp, dst, src, target_pc);
+}
+
+#[inline]
+fn emit_jsle(comp: &mut Compiler, src: [Register; 2], dst: [Register; 2], target_pc: usize) {
+    emit_jsge(comp, dst, src, target_pc);
+}
+
+macro_rules! make_jmp_imm {
+    ($name:ident, $name_imm:ident) => {
+        #[inline]
+        fn $name_imm(comp: &mut Compiler, dst: [Register; 2], imm: i64, target_pc: usize) {
+            emit_load_immediate(comp, OperandSize::S64, RSCRATCH, imm);
+            $name(comp, RSCRATCH, dst, target_pc);
+        }
+    }
+}
+
+make_jmp_imm!(emit_jeq, emit_jeq_imm);
+make_jmp_imm!(emit_jgt, emit_jgt_imm);
+make_jmp_imm!(emit_jge, emit_jge_imm);
+make_jmp_imm!(emit_jlt, emit_jlt_imm);
+make_jmp_imm!(emit_jle, emit_jle_imm);
+make_jmp_imm!(emit_jset, emit_jset_imm);
+make_jmp_imm!(emit_jne, emit_jne_imm);
+make_jmp_imm!(emit_jsgt, emit_jsgt_imm);
+make_jmp_imm!(emit_jsge, emit_jsge_imm);
+make_jmp_imm!(emit_jslt, emit_jslt_imm);
+make_jmp_imm!(emit_jsle, emit_jsle_imm);
 
 #[allow(dead_code)]
 enum Value {
@@ -1149,19 +1215,88 @@ impl Compiler {
                         }
                     }
                 },
-//              ebpf::BE         => {
-//                  match insn.imm {
-//                      16 => {
-//                          emit_ins(self, RiscVInstruction::bswap(OperandSize::S16, dst));
-//                          emit_ins(self, RiscVInstruction::alu(OperandSize::S32, 0x81, 4, dst, 0xffff, None)); // Mask to 16 bit
-//                      }
-//                      32 => emit_ins(self, RiscVInstruction::bswap(OperandSize::S32, dst)),
-//                      64 => emit_ins(self, RiscVInstruction::bswap(OperandSize::S64, dst)),
-//                      _ => {
-//                          return Err(EbpfError::InvalidInstruction(self.pc + ebpf::ELF_INSN_DUMP_OFFSET));
-//                      }
-//                  }
-//              },
+                ebpf::BE         => {
+                    match insn.imm {
+                        16 => {
+                            emit_ins(self, RiscVInstruction::xori(dst[0], RSCRATCH[0], 0xff));
+                            emit_ins(self, RiscVInstruction::srli(dst[0], dst[0], 8));
+                            emit_ins(self, RiscVInstruction::xori(dst[0], RSCRATCH[0], 0xff));
+                            emit_ins(self, RiscVInstruction::slli(RSCRATCH[0], RSCRATCH[0], 8));
+                            emit_ins(self, RiscVInstruction::or(dst[0], RSCRATCH[0], dst[0]));
+
+                            // zero top 32 bits
+                            emit_riscv_li(self, dst[1], 0);
+                        }
+                        32 => {
+                            // copy top two bytes to RSCRATCH[1]
+                            emit_ins(self, RiscVInstruction::srli(dst[0], RSCRATCH[1], 16));
+
+                            // swap bottom two bytes
+                            emit_ins(self, RiscVInstruction::xori(dst[0], RSCRATCH[0], 0xff));
+                            emit_ins(self, RiscVInstruction::srli(dst[0], dst[0], 8));
+                            emit_ins(self, RiscVInstruction::xori(dst[0], RSCRATCH[0], 0xff));
+                            emit_ins(self, RiscVInstruction::slli(RSCRATCH[0], RSCRATCH[0], 8));
+                            emit_ins(self, RiscVInstruction::or(dst[0], RSCRATCH[0], dst[0]));
+
+                            // swap top two bytes
+                            emit_ins(self, RiscVInstruction::xori(RSCRATCH[1], RSCRATCH[0], 0xff));
+                            emit_ins(self, RiscVInstruction::srli(RSCRATCH[1], RSCRATCH[1], 8));
+                            emit_ins(self, RiscVInstruction::xori(RSCRATCH[1], RSCRATCH[0], 0xff));
+                            emit_ins(self, RiscVInstruction::slli(RSCRATCH[0], RSCRATCH[0], 8));
+                            emit_ins(self, RiscVInstruction::or(RSCRATCH[1], RSCRATCH[0], RSCRATCH[1]));
+
+                            // merge top and bottom
+                            emit_ins(self, RiscVInstruction::slli(dst[0], dst[0], 16));
+                            emit_ins(self, RiscVInstruction::or(dst[0], RSCRATCH[1], dst[0]));
+
+                            // zero top 32 bits
+                            emit_riscv_li(self, dst[1], 0);
+                        },
+                        64 => {
+                            // do the above for the bottom 32 bits, storing the result in RSCRATCH2
+                            emit_ins(self, RiscVInstruction::srli(dst[0], RSCRATCH[1], 16));
+
+                            emit_ins(self, RiscVInstruction::xori(dst[0], RSCRATCH[0], 0xff));
+                            emit_ins(self, RiscVInstruction::srli(dst[0], dst[0], 8));
+                            emit_ins(self, RiscVInstruction::xori(dst[0], RSCRATCH[0], 0xff));
+                            emit_ins(self, RiscVInstruction::slli(RSCRATCH[0], RSCRATCH[0], 8));
+                            emit_ins(self, RiscVInstruction::or(dst[0], RSCRATCH[0], dst[0]));
+
+                            emit_ins(self, RiscVInstruction::xori(RSCRATCH[1], RSCRATCH[0], 0xff));
+                            emit_ins(self, RiscVInstruction::srli(RSCRATCH[1], RSCRATCH[1], 8));
+                            emit_ins(self, RiscVInstruction::xori(RSCRATCH[1], RSCRATCH[0], 0xff));
+                            emit_ins(self, RiscVInstruction::slli(RSCRATCH[0], RSCRATCH[0], 8));
+                            emit_ins(self, RiscVInstruction::or(RSCRATCH[1], RSCRATCH[0], RSCRATCH[1]));
+
+                            emit_ins(self, RiscVInstruction::slli(dst[0], dst[0], 16));
+                            emit_ins(self, RiscVInstruction::or(dst[0], RSCRATCH[1], RSCRATCH2));
+
+                            // and now the top 32 bits, into dst[0]
+                            emit_ins(self, RiscVInstruction::srli(dst[1], RSCRATCH[1], 16));
+
+                            emit_ins(self, RiscVInstruction::xori(dst[1], RSCRATCH[0], 0xff));
+                            emit_ins(self, RiscVInstruction::srli(dst[1], dst[1], 8));
+                            emit_ins(self, RiscVInstruction::xori(dst[1], RSCRATCH[0], 0xff));
+                            emit_ins(self, RiscVInstruction::slli(RSCRATCH[0], RSCRATCH[0], 8));
+                            emit_ins(self, RiscVInstruction::or(dst[1], RSCRATCH[0], dst[1]));
+
+                            emit_ins(self, RiscVInstruction::xori(RSCRATCH[1], RSCRATCH[0], 0xff));
+                            emit_ins(self, RiscVInstruction::srli(RSCRATCH[1], RSCRATCH[1], 8));
+                            emit_ins(self, RiscVInstruction::xori(RSCRATCH[1], RSCRATCH[0], 0xff));
+                            emit_ins(self, RiscVInstruction::slli(RSCRATCH[0], RSCRATCH[0], 8));
+                            emit_ins(self, RiscVInstruction::or(RSCRATCH[1], RSCRATCH[0], RSCRATCH[1]));
+
+                            emit_ins(self, RiscVInstruction::slli(dst[1], dst[1], 16));
+                            emit_ins(self, RiscVInstruction::or(dst[1], RSCRATCH[1], dst[0]));
+
+                            // finish the dword swap
+                            emit_ins(self, RiscVInstruction::mv(RSCRATCH2, dst[1]));
+                        },
+                        _ => {
+                            return Err(EbpfError::InvalidInstruction(self.pc + ebpf::ELF_INSN_DUMP_OFFSET));
+                        }
+                    }
+                },
 
                 // BPF_ALU64 class
                 ebpf::ADD64_REG  => emit_add(self, OperandSize::S64, src, dst),
@@ -1199,28 +1334,29 @@ impl Compiler {
                     emit_load_immediate(self, OperandSize::S64, RSCRATCH, target_pc as i64);
                     emit_jump_to_pc(self, Register::X0, target_pc);
                 },
-//              ebpf::JEQ_IMM    => emit_conditional_branch_imm(self, 0x84, false, insn.imm, dst, target_pc),
-//              ebpf::JEQ_REG    => emit_conditional_branch_reg(self, 0x84, false, src, dst, target_pc),
-//              ebpf::JGT_IMM    => emit_conditional_branch_imm(self, 0x87, false, insn.imm, dst, target_pc),
-//              ebpf::JGT_REG    => emit_conditional_branch_reg(self, 0x87, false, src, dst, target_pc),
-//              ebpf::JGE_IMM    => emit_conditional_branch_imm(self, 0x83, false, insn.imm, dst, target_pc),
-//              ebpf::JGE_REG    => emit_conditional_branch_reg(self, 0x83, false, src, dst, target_pc),
-//              ebpf::JLT_IMM    => emit_conditional_branch_imm(self, 0x82, false, insn.imm, dst, target_pc),
-//              ebpf::JLT_REG    => emit_conditional_branch_reg(self, 0x82, false, src, dst, target_pc),
-//              ebpf::JLE_IMM    => emit_conditional_branch_imm(self, 0x86, false, insn.imm, dst, target_pc),
-//              ebpf::JLE_REG    => emit_conditional_branch_reg(self, 0x86, false, src, dst, target_pc),
-//              ebpf::JSET_IMM   => emit_conditional_branch_imm(self, 0x85, true, insn.imm, dst, target_pc),
-//              ebpf::JSET_REG   => emit_conditional_branch_reg(self, 0x85, true, src, dst, target_pc),
-//              ebpf::JNE_IMM    => emit_conditional_branch_imm(self, 0x85, false, insn.imm, dst, target_pc),
-//              ebpf::JNE_REG    => emit_conditional_branch_reg(self, 0x85, false, src, dst, target_pc),
-//              ebpf::JSGT_IMM   => emit_conditional_branch_imm(self, 0x8f, false, insn.imm, dst, target_pc),
-//              ebpf::JSGT_REG   => emit_conditional_branch_reg(self, 0x8f, false, src, dst, target_pc),
-//              ebpf::JSGE_IMM   => emit_conditional_branch_imm(self, 0x8d, false, insn.imm, dst, target_pc),
-//              ebpf::JSGE_REG   => emit_conditional_branch_reg(self, 0x8d, false, src, dst, target_pc),
-//              ebpf::JSLT_IMM   => emit_conditional_branch_imm(self, 0x8c, false, insn.imm, dst, target_pc),
-//              ebpf::JSLT_REG   => emit_conditional_branch_reg(self, 0x8c, false, src, dst, target_pc),
-//              ebpf::JSLE_IMM   => emit_conditional_branch_imm(self, 0x8e, false, insn.imm, dst, target_pc),
-//              ebpf::JSLE_REG   => emit_conditional_branch_reg(self, 0x8e, false, src, dst, target_pc),
+                ebpf::JEQ_REG    => emit_jeq(self, src, dst, target_pc),
+                ebpf::JGT_REG    => emit_jgt(self, src, dst, target_pc),
+                ebpf::JGE_REG    => emit_jge(self, src, dst, target_pc),
+                ebpf::JLT_REG    => emit_jlt(self, src, dst, target_pc),
+                ebpf::JLE_REG    => emit_jle(self, src, dst, target_pc),
+                ebpf::JSET_REG   => emit_jset(self, src, dst, target_pc),
+                ebpf::JNE_REG    => emit_jne(self, src, dst, target_pc),
+                ebpf::JSGT_REG   => emit_jsgt(self, src, dst, target_pc),
+                ebpf::JSGE_REG   => emit_jsge(self, src, dst, target_pc),
+                ebpf::JSLT_REG   => emit_jslt(self, src, dst, target_pc),
+                ebpf::JSLE_REG   => emit_jsle(self, src, dst, target_pc),
+                ebpf::JEQ_IMM    => emit_jeq_imm(self, dst, insn.imm, target_pc),
+                ebpf::JGT_IMM    => emit_jgt_imm(self, dst, insn.imm, target_pc),
+                ebpf::JGE_IMM    => emit_jge_imm(self, dst, insn.imm, target_pc),
+                ebpf::JLT_IMM    => emit_jlt_imm(self, dst, insn.imm, target_pc),
+                ebpf::JLE_IMM    => emit_jle_imm(self, dst, insn.imm, target_pc),
+                ebpf::JSET_IMM   => emit_jset_imm(self, dst, insn.imm, target_pc),
+                ebpf::JNE_IMM    => emit_jne_imm(self, dst, insn.imm, target_pc),
+                ebpf::JSGT_IMM   => emit_jsgt_imm(self, dst, insn.imm, target_pc),
+                ebpf::JSGE_IMM   => emit_jsge_imm(self, dst, insn.imm, target_pc),
+                ebpf::JSLT_IMM   => emit_jslt_imm(self, dst, insn.imm, target_pc),
+                ebpf::JSLE_IMM   => emit_jsle_imm(self, dst, insn.imm, target_pc),
+
 //              ebpf::CALL_IMM   => {
 //                  // For JIT, syscalls MUST be registered at compile time. They can be
 //                  // updated later, but not created after compiling (we need the address of the
@@ -1272,13 +1408,13 @@ impl Compiler {
                     if self.config.enable_instruction_meter {
                         emit_ins(self, RiscVInstruction::bne(REGISTER_MAP[FRAME_PTR_REG][0], Register::X0, 4 * 6));
                         // manually load so that we know how many instructions to jump
-                        emit_riscv_li_controlled(self, RSCRATCH[0], self.pc as i32, true);
-                        emit_riscv_li_controlled(self, RSCRATCH[1], (self.pc >> 32) as i32, true);
+                        emit_riscv_li_controlled(self, RSCRATCH[0], self.pc as i32, true); // 2 instructions
+                        emit_riscv_li_controlled(self, RSCRATCH[1], (self.pc >> 32) as i32, true); // 2
                     } else {
                         emit_ins(self, RiscVInstruction::bne(REGISTER_MAP[FRAME_PTR_REG][0], Register::X0, 4 * 2));
                     }
                     // we're done
-                    emit_jump_to_anchor(self, Register::X0, ANCHOR_EXIT);
+                    emit_long_jump_to_anchor(self, Register::X0, ANCHOR_EXIT); // 2
 
                     // else decrement and update CallDepth
                     emit_ins(self, RiscVInstruction::addi(REGISTER_MAP[FRAME_PTR_REG][0], REGISTER_MAP[FRAME_PTR_REG][0], -1));
