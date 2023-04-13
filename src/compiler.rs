@@ -28,7 +28,7 @@ use rand::{rngs::SmallRng, Rng, SeedableRng};
 use crate::{
     elf::Executable,
     vm::{Config, InstructionMeter},
-    ebpf::{self, FIRST_SCRATCH_REG, SCRATCH_REGS, FRAME_PTR_REG, MM_STACK_START, STACK_PTR_REG},
+    ebpf::{self, FIRST_SCRATCH_REG, SCRATCH_REGS, FRAME_PTR_REG, MM_STACK_START, STACK_PTR_REG, INSN_SIZE},
     error::{UserDefinedError, EbpfError},
     memory_region::AccessType,
     riscv::*,
@@ -129,7 +129,7 @@ const REGISTER_MAP: [[Register; 2]; 11] = [
 
 const RZERO: [Register; 2] = [Register::X0, Register::X0];
 const RSCRATCH: [Register; 2] = [CALLEE_SAVED_REGISTERS[11], CALLEE_SAVED_REGISTERS[12]];
-const RSCRATCH2: Register = Register::TP;
+const RSCRATCH2: [Register; 2] = [Register::TP, Register::A7];
 
 // Special registers:
 //      ARGUMENT_REGISTERS[0]  A0      BPF program counter limit (used by instruction meter)
@@ -137,7 +137,7 @@ const RSCRATCH2: Register = Register::TP;
 // CALLER_SAVED_REGISTERS[15]  T6      Constant pointer to initial Register::SP - 8
 // CALLER_SAVED_REGISTERS[ 0]  RA      Return address
 // CALLEE_SAVED_REGISTERS[ 0]  SP      Stack pointer
-//                  RSCRATCH2  TP      Secondary scratch
+//                  RSCRATCH2  TP,A7   Secondary scratch
 
 #[inline]
 pub fn emit<T>(jit: &mut Compiler, data: T) {
@@ -336,7 +336,69 @@ fn emit_profile_instruction_count_finalize(jit: &mut Compiler, store_pc_in_excep
 //    }
 }
 
-fn emit_c_call(comp: &mut Compiler, symbol: &'static str) {
+enum Value {
+    Register([Register; 2]),
+//  RegisterIndirect([Register; 2], i32, bool),
+//  RegisterPlusConstant32([Register; 2], i32, bool),
+    RegisterPlusConstant64([Register; 2], i64, bool),
+    Constant64(i64, bool),
+}
+
+#[inline]
+fn emit_bpf_call(comp: &mut Compiler, dst: Value) {
+    // Store PC in case the bounds check fails
+    emit_load_immediate(comp, OperandSize::S64, RSCRATCH, comp.pc as i64);
+
+    emit_jump_to_anchor(comp, Register::RA, ANCHOR_BPF_CALL_PROLOGUE);
+
+    match dst {
+        Value::Register(reg) => {
+            // Move vm target_address into RAX
+            emit_push(comp, REGISTER_MAP[0]);
+            if reg != REGISTER_MAP[0] {
+                emit_mov(comp, OperandSize::S64, reg, REGISTER_MAP[0]);
+            }
+
+            emit_jump_to_anchor(comp, Register::RA, ANCHOR_BPF_CALL_REG);
+
+            emit_validate_and_profile_instruction_count(comp, false, None);
+//          emit_ins(jit, X86Instruction::mov(OperandSize::S64, REGISTER_MAP[0], R11));
+            emit_ins(comp, RiscVInstruction::mv(REGISTER_MAP[0][0], RSCRATCH[0])); // Save target_pc
+//          emit_ins(jit, X86Instruction::pop(REGISTER_MAP[0]));
+            emit_pop(comp, REGISTER_MAP[0]); // Restore register 0
+//          emit_ins(jit, X86Instruction::call_reg(R11, None)); // callq *%r11
+            emit_call_reg(comp, RSCRATCH[0]);
+        },
+        Value::Constant64(target_pc, user_provided) => {
+            debug_assert!(!user_provided);
+            emit_validate_and_profile_instruction_count(comp, false, Some(target_pc as usize));
+//          emit_ins(jit, X86Instruction::load_immediate(OperandSize::S64, R11, target_pc as i64));
+            emit_load_immediate(comp, OperandSize::S64, RSCRATCH, target_pc as i64);
+//          let jump_offset = jit.relative_to_target_pc(target_pc as usize, 5);
+//          emit_ins(jit, X86Instruction::call_immediate(jump_offset));
+            emit_jump_to_pc(comp, Register::RA, target_pc as usize);
+        },
+        _ => {
+            #[cfg(debug_assertions)]
+            unreachable!();
+        }
+    }
+
+    emit_undo_profile_instruction_count(comp, 0);
+
+//  // Restore the previous frame pointer
+//  emit_ins(jit, X86Instruction::pop(REGISTER_MAP[FRAME_PTR_REG]));
+    emit_pop(comp, REGISTER_MAP[FRAME_PTR_REG]);
+//  let frame_ptr_access = X86IndirectAccess::Offset(slot_on_environment_stack(jit, EnvironmentStackSlot::BpfFramePtr));
+//  emit_ins(jit, X86Instruction::store(OperandSize::S64, REGISTER_MAP[FRAME_PTR_REG], RBP, frame_ptr_access));
+    emit_store_offset(comp, OperandSize::S64, Register::T6, REGISTER_MAP[FRAME_PTR_REG], slot_on_environment_stack(comp, EnvironmentStackSlot::BpfFramePtr));
+    for reg in REGISTER_MAP.iter().skip(FIRST_SCRATCH_REG).take(SCRATCH_REGS).rev() {
+//      emit_ins(jit, X86Instruction::pop(*reg));
+        emit_pop(comp, *reg);
+    }
+}
+
+fn emit_c_call(comp: &mut Compiler, symbol: &'static str, args : &[Value]) {
     let saved_registers = CALLER_SAVED_REGISTERS.to_vec();
 
     // save registers on stack
@@ -344,10 +406,25 @@ fn emit_c_call(comp: &mut Compiler, symbol: &'static str) {
         emit_riscv_push(comp, *reg);
     }
 
-    // we assume for now that the arguments are in the scratch registers
-    emit_ins(comp, RiscVInstruction::mv(RSCRATCH[0], ARGUMENT_REGISTERS[0]));
-    emit_ins(comp, RiscVInstruction::mv(RSCRATCH[1], ARGUMENT_REGISTERS[1]));
-    emit_ins(comp, RiscVInstruction::mv(RSCRATCH2, ARGUMENT_REGISTERS[2]));
+    if args.len() > 4 {
+        panic!("too many arguments in emit_c_call!");
+    }
+
+    // load arguments
+    for value in args.iter().rev() {
+        match value {
+            Value::Register(reg) => {
+                emit_push(comp, *reg);
+            },
+            _ => {
+                #[cfg(debug_assertions)]
+                unreachable!();
+            },
+        }
+    }
+    for i in 0..args.len() {
+        emit_pop(comp, [ARGUMENT_REGISTERS[i], ARGUMENT_REGISTERS[i+1]]);
+    }
 
     // ensure stack alignment
     emit_ins(comp, RiscVInstruction::addi(Register::X0, RSCRATCH[1], 16));
@@ -355,7 +432,7 @@ fn emit_c_call(comp: &mut Compiler, symbol: &'static str) {
     emit_ins(comp, RiscVInstruction::sub(Register::SP, RSCRATCH[0], Register::SP));
 
     // add relocation
-    comp.relocations.push(Relocation { offset: comp.offset_in_text_section, symbol });
+    comp.relocations.push(RiscVRelocation::Call { offset: comp.offset_in_text_section, symbol });
 
     // call the function
     emit_long_jump(comp, Register::RA, 0);
@@ -374,6 +451,14 @@ fn emit_c_call(comp: &mut Compiler, symbol: &'static str) {
 }
 
 #[inline]
+fn emit_load_symbol_address(comp: &mut Compiler, destination: Register, symbol: &'static str) {
+    comp.relocations.push(RiscVRelocation::Hi20 { offset: comp.offset_in_text_section, symbol });
+    emit_ins(comp, RiscVInstruction::lui(destination, 0));
+    comp.relocations.push(RiscVRelocation::Lo12I { offset: comp.offset_in_text_section, symbol });
+    emit_ins(comp, RiscVInstruction::addi(destination, destination, 0));
+}
+
+#[inline]
 fn emit_address_translation(comp: &mut Compiler, vm_addr: Value) {
     match vm_addr {
         Value::RegisterPlusConstant64(reg, constant, _) => {
@@ -388,7 +473,7 @@ fn emit_address_translation(comp: &mut Compiler, vm_addr: Value) {
             unreachable!();
         },
     }
-    emit_c_call(comp, "translate_memory_address");
+    emit_c_call(comp, "translate_memory_address", &[Value::Register(RSCRATCH)]);
 }
 
 // RISC-V sign-extends the 12-bit immediate, so an extra step is necessary to compensate
@@ -441,8 +526,8 @@ fn emit_jump(comp: &mut Compiler, return_reg: Register, offset: i32) {
 #[inline]
 fn emit_long_jump(comp: &mut Compiler, return_reg: Register, offset: i32) {
     let (upper, lower) = make_split_immediate(offset);
-    emit_ins(comp, RiscVInstruction::auipc(RSCRATCH2, upper));
-    emit_ins(comp, RiscVInstruction::jalr(RSCRATCH2, return_reg, lower));
+    emit_ins(comp, RiscVInstruction::auipc(RSCRATCH2[0], upper));
+    emit_ins(comp, RiscVInstruction::jalr(RSCRATCH2[0], return_reg, lower));
 }
 
 #[inline]
@@ -510,14 +595,14 @@ fn emit_load_offset(comp: &mut Compiler, size: OperandSize, addr: Register, dst:
 
 #[inline]
 fn emit_store_immediate(comp: &mut Compiler, size: OperandSize, addr: Register, imm: i64) {
-    emit_riscv_li(comp, RSCRATCH2, imm as i32);
+    emit_riscv_li(comp, RSCRATCH2[0], imm as i32);
     match size {
         OperandSize:: S64 => {
-            emit_ins(comp, RiscVInstruction::sw(addr, RSCRATCH2, 0));
-            emit_riscv_li(comp, RSCRATCH2, (imm >> 32) as i32);
-            emit_ins(comp, RiscVInstruction::sw(addr, RSCRATCH2, 4));
+            emit_ins(comp, RiscVInstruction::sw(addr, RSCRATCH2[0], 0));
+            emit_riscv_li(comp, RSCRATCH2[0], (imm >> 32) as i32);
+            emit_ins(comp, RiscVInstruction::sw(addr, RSCRATCH2[0], 4));
         },
-        _ => emit_store(comp, size, addr, [RSCRATCH2, Register::X0]),
+        _ => emit_store(comp, size, addr, [RSCRATCH2[0], Register::X0]),
     }
 }
 
@@ -596,9 +681,9 @@ fn emit_add(comp: &mut Compiler, size: OperandSize, src: [Register; 2], dst: [Re
             emit_riscv_li(comp, dst[1], 0);
         }
         OperandSize::S64 => {
-            emit_ins(comp, RiscVInstruction::sltu(dst[0], src[0], RSCRATCH2));
+            emit_ins(comp, RiscVInstruction::sltu(dst[0], src[0], RSCRATCH2[0]));
             emit_ins(comp, RiscVInstruction::add(dst[1], src[1], dst[1]));
-            emit_ins(comp, RiscVInstruction::add(dst[1], RSCRATCH2, dst[1]));
+            emit_ins(comp, RiscVInstruction::add(dst[1], RSCRATCH2[0], dst[1]));
         }
         _ => panic!("unsupported instruction!")
     }
@@ -612,11 +697,11 @@ fn emit_sub(comp: &mut Compiler, size: OperandSize, src: [Register; 2], dst: [Re
             emit_riscv_li(comp, dst[1], 0);
         }
         OperandSize::S64 => {
-            emit_ins(comp, RiscVInstruction::mv(dst[0], RSCRATCH2));
+            emit_ins(comp, RiscVInstruction::mv(dst[0], RSCRATCH2[0]));
             emit_ins(comp, RiscVInstruction::sub(dst[0], src[0], dst[0]));
-            emit_ins(comp, RiscVInstruction::sltu(RSCRATCH2, dst[0], RSCRATCH2));
+            emit_ins(comp, RiscVInstruction::sltu(RSCRATCH2[0], dst[0], RSCRATCH2[0]));
             emit_ins(comp, RiscVInstruction::sub(dst[1], src[1], dst[1]));
-            emit_ins(comp, RiscVInstruction::sub(dst[1], RSCRATCH2, dst[1]));
+            emit_ins(comp, RiscVInstruction::sub(dst[1], RSCRATCH2[0], dst[1]));
         }
         _ => panic!("unsupported instruction!")
     }
@@ -631,11 +716,11 @@ fn emit_mul(comp: &mut Compiler, size: OperandSize, src: [Register; 2], dst: [Re
         }
         OperandSize::S64 => {
             emit_ins(comp, RiscVInstruction::mul(dst[1], src[0], dst[1]));
-            emit_ins(comp, RiscVInstruction::mul(dst[0], src[1], RSCRATCH2));
-            emit_ins(comp, RiscVInstruction::add(dst[1], RSCRATCH2, dst[1]));
-            emit_ins(comp, RiscVInstruction::mulhu(dst[0], src[0], RSCRATCH2));
+            emit_ins(comp, RiscVInstruction::mul(dst[0], src[1], RSCRATCH2[0]));
+            emit_ins(comp, RiscVInstruction::add(dst[1], RSCRATCH2[0], dst[1]));
+            emit_ins(comp, RiscVInstruction::mulhu(dst[0], src[0], RSCRATCH2[0]));
             emit_ins(comp, RiscVInstruction::mul(dst[0], src[0], dst[0]));
-            emit_ins(comp, RiscVInstruction::add(dst[1], RSCRATCH2, dst[1]));
+            emit_ins(comp, RiscVInstruction::add(dst[1], RSCRATCH2[0], dst[1]));
         }
         _ => panic!("unsupported instruction!")
     }
@@ -649,8 +734,7 @@ fn emit_div(comp: &mut Compiler, size: OperandSize, src: [Register; 2], dst: [Re
             emit_riscv_li(comp, dst[1], 0);
         }
         OperandSize::S64 => {
-            //TODO
-            panic!("unimplemented!");
+            emit_c_call(comp, "bpf_div64", &[Value::Register(dst), Value::Register(src)]);
         }
         _ => panic!("unsupported instruction!")
     }
@@ -664,8 +748,7 @@ fn emit_sdiv(comp: &mut Compiler, size: OperandSize, src: [Register; 2], dst: [R
             emit_riscv_li(comp, dst[1], 0);
         }
         OperandSize::S64 => {
-            //TODO
-            panic!("unimplemented!");
+            emit_c_call(comp, "bpf_sdiv64", &[Value::Register(dst), Value::Register(src)]);
         }
         _ => panic!("unsupported instruction!")
     }
@@ -679,8 +762,7 @@ fn emit_mod(comp: &mut Compiler, size: OperandSize, src: [Register; 2], dst: [Re
             emit_riscv_li(comp, dst[1], 0);
         }
         OperandSize::S64 => {
-            //TODO
-            panic!("unimplemented!");
+            emit_c_call(comp, "bpf_mod64", &[Value::Register(dst), Value::Register(src)]);
         }
         _ => panic!("unsupported instruction!")
     }
@@ -722,8 +804,7 @@ fn emit_lsh(comp: &mut Compiler, size: OperandSize, src: [Register; 2], dst: [Re
             emit_riscv_li(comp, dst[1], 0);
         }
         OperandSize::S64 => {
-            //TODO
-            panic!("unimplemented!");
+            emit_c_call(comp, "bpf_lsh64", &[Value::Register(dst), Value::Register(src)]);
         }
         _ => panic!("unsupported instruction!")
     }
@@ -737,8 +818,7 @@ fn emit_rsh(comp: &mut Compiler, size: OperandSize, src: [Register; 2], dst: [Re
             emit_riscv_li(comp, dst[1], 0);
         }
         OperandSize::S64 => {
-            //TODO
-            panic!("unimplemented!");
+            emit_c_call(comp, "bpf_rsh64", &[Value::Register(dst), Value::Register(src)]);
         }
         _ => panic!("unsupported instruction!")
     }
@@ -766,8 +846,7 @@ fn emit_arsh(comp: &mut Compiler, size: OperandSize, src: [Register; 2], dst: [R
             emit_riscv_li(comp, dst[1], 0);
         }
         OperandSize::S64 => {
-            //TODO
-            panic!("unimplemented!");
+            emit_c_call(comp, "bpf_arsh64", &[Value::Register(dst), Value::Register(src)]);
         }
         _ => panic!("unsupported instruction!")
     }
@@ -779,8 +858,8 @@ macro_rules! make_arith_imm {
         fn $name_imm(comp: &mut Compiler, size: OperandSize, dst: [Register; 2], imm: i64) {
             match size {
                 OperandSize::S32 => {
-                    emit_riscv_li(comp, RSCRATCH2, imm as i32);
-                    $name(comp, size, [RSCRATCH2, Register::X0], dst);
+                    emit_riscv_li(comp, RSCRATCH2[0], imm as i32);
+                    $name(comp, size, [RSCRATCH2[0], Register::X0], dst);
                 },
                 OperandSize::S64 => {
                     let scratch0 = if dst[0] == RSCRATCH[0] || dst[1] == RSCRATCH[0] {
@@ -880,10 +959,10 @@ fn emit_jle(comp: &mut Compiler, src: [Register; 2], dst: [Register; 2], target_
 
 #[inline]
 fn emit_jset(comp: &mut Compiler, src: [Register; 2], dst: [Register; 2], target_pc: usize) {
-    emit_ins(comp, RiscVInstruction::and(src[0], dst[0], RSCRATCH2));
-    emit_ins(comp, RiscVInstruction::bne(RSCRATCH2, Register::X0, 4 * 3));
-    emit_ins(comp, RiscVInstruction::and(src[1], dst[1], RSCRATCH2));
-    emit_ins(comp, RiscVInstruction::beq(RSCRATCH2, Register::X0, 4 * 3));
+    emit_ins(comp, RiscVInstruction::and(src[0], dst[0], RSCRATCH2[0]));
+    emit_ins(comp, RiscVInstruction::bne(RSCRATCH2[0], Register::X0, 4 * 3));
+    emit_ins(comp, RiscVInstruction::and(src[1], dst[1], RSCRATCH2[0]));
+    emit_ins(comp, RiscVInstruction::beq(RSCRATCH2[0], Register::X0, 4 * 3));
     emit_long_jump_to_pc(comp, Register::X0, target_pc); // 2 instructions
 }
 
@@ -942,37 +1021,40 @@ make_jmp_imm!(emit_jsge, emit_jsge_imm);
 make_jmp_imm!(emit_jslt, emit_jslt_imm);
 make_jmp_imm!(emit_jsle, emit_jsle_imm);
 
-#[allow(dead_code)]
-enum Value {
-    Register([Register; 2]),
-    RegisterIndirect([Register; 2], i32, bool),
-    RegisterPlusConstant32([Register; 2], i32, bool),
-    RegisterPlusConstant64([Register; 2], i64, bool),
-    Constant64(i64, bool),
-}
-
 #[derive(Debug)]
 struct Jump {
     location: *const u8,
     target_pc: usize,
 }
 
-pub struct Relocation {
-    pub offset: usize,
-    pub symbol: &'static str,
+pub enum RiscVRelocation {
+    Call {
+        offset: usize,
+        symbol: &'static str,
+    },
+    Hi20 {
+        offset: usize,
+        symbol: &'static str,
+    },
+    Lo12I {
+        offset: usize,
+        symbol: &'static str,
+    },
 }
 
 #[allow(dead_code)]
 pub struct Compiler {
     pub result: ProgramSections,
+    pub pc_offsets : Vec<u32>,
     text_section_jumps: Vec<Jump>,
-    pub relocations: Vec<Relocation>,
+    pub relocations: Vec<RiscVRelocation>,
     offset_in_text_section: usize,
     pc: usize,
     last_instruction_meter_validation_pc: usize,
     next_noop_insertion: u32,
     program_vm_addr: u64,
     anchors: [*const u8; ANCHOR_COUNT],
+    anchor_offsets: [usize; ANCHOR_COUNT],
     pub(crate) config: Config,
     diversification_rng: SmallRng,
     stopwatch_is_active: bool,
@@ -1034,6 +1116,7 @@ impl Compiler {
             code_length_estimate += pc / config.instruction_meter_checkpoint_distance * MACHINE_CODE_PER_INSTRUCTION_METER_CHECKPOINT;
         }
         let result = ProgramSections::new(pc + 1, code_length_estimate)?;
+        let pc_offsets = vec![0; pc + 1];
 
         let mut diversification_rng = SmallRng::from_rng(rand::thread_rng()).unwrap();
         let (environment_stack_key, program_argument_key) =
@@ -1049,6 +1132,7 @@ impl Compiler {
 
         Ok(Self {
             result,
+            pc_offsets,
             text_section_jumps: vec![],
             relocations: vec![],
             offset_in_text_section: 0,
@@ -1057,6 +1141,7 @@ impl Compiler {
             next_noop_insertion: if config.noop_instruction_rate == 0 { u32::MAX } else { diversification_rng.gen_range(0..config.noop_instruction_rate * 2) },
             program_vm_addr: 0,
             anchors: [std::ptr::null(); ANCHOR_COUNT],
+            anchor_offsets: [0; ANCHOR_COUNT],
             config: *config,
             diversification_rng,
             stopwatch_is_active: false,
@@ -1068,7 +1153,6 @@ impl Compiler {
 
     pub fn compile<E: UserDefinedError, I: InstructionMeter>(&mut self,
             executable: &Executable<E, I>) -> Result<(), EbpfError<E>> {
-        let text_section_base = self.result.text_section.as_ptr();
         let (program_vm_addr, program) = executable.get_text_bytes();
         self.program_vm_addr = program_vm_addr;
 
@@ -1082,7 +1166,7 @@ impl Compiler {
                 return Err(EbpfError::ExhaustedTextSegment(self.pc));
             }
             let mut insn = ebpf::get_insn_unchecked(program, self.pc);
-            self.result.pc_section[self.pc] = unsafe { text_section_base.add(self.offset_in_text_section) } as usize;
+            self.add_to_pc_section(self.offset_in_text_section);
 
             // Regular instruction meter checkpoints to prevent long linear runs from exceeding their budget
             if self.last_instruction_meter_validation_pc + self.config.instruction_meter_checkpoint_distance <= self.pc {
@@ -1111,7 +1195,7 @@ impl Compiler {
                 ebpf::LD_DW_IMM  => {
                     emit_validate_and_profile_instruction_count(self, true, Some(self.pc + 2));
                     self.pc += 1;
-                    self.result.pc_section[self.pc] = self.anchors[ANCHOR_CALL_UNSUPPORTED_INSTRUCTION] as usize;
+                    self.add_to_pc_section(self.anchor_offsets[ANCHOR_CALL_UNSUPPORTED_INSTRUCTION]);
                     ebpf::augment_lddw_unchecked(program, &mut insn);
                     emit_load_immediate(self, OperandSize::S64, dst, insn.imm);
                 },
@@ -1253,7 +1337,7 @@ impl Compiler {
                             emit_riscv_li(self, dst[1], 0);
                         },
                         64 => {
-                            // do the above for the bottom 32 bits, storing the result in RSCRATCH2
+                            // do the above for the bottom 32 bits, storing the result in RSCRATCH2[0]
                             emit_ins(self, RiscVInstruction::srli(dst[0], RSCRATCH[1], 16));
 
                             emit_ins(self, RiscVInstruction::xori(dst[0], RSCRATCH[0], 0xff));
@@ -1269,7 +1353,7 @@ impl Compiler {
                             emit_ins(self, RiscVInstruction::or(RSCRATCH[1], RSCRATCH[0], RSCRATCH[1]));
 
                             emit_ins(self, RiscVInstruction::slli(dst[0], dst[0], 16));
-                            emit_ins(self, RiscVInstruction::or(dst[0], RSCRATCH[1], RSCRATCH2));
+                            emit_ins(self, RiscVInstruction::or(dst[0], RSCRATCH[1], RSCRATCH2[0]));
 
                             // and now the top 32 bits, into dst[0]
                             emit_ins(self, RiscVInstruction::srli(dst[1], RSCRATCH[1], 16));
@@ -1290,7 +1374,7 @@ impl Compiler {
                             emit_ins(self, RiscVInstruction::or(dst[1], RSCRATCH[1], dst[0]));
 
                             // finish the dword swap
-                            emit_ins(self, RiscVInstruction::mv(RSCRATCH2, dst[1]));
+                            emit_ins(self, RiscVInstruction::mv(RSCRATCH2[0], dst[1]));
                         },
                         _ => {
                             return Err(EbpfError::InvalidInstruction(self.pc + ebpf::ELF_INSN_DUMP_OFFSET));
@@ -1357,18 +1441,19 @@ impl Compiler {
                 ebpf::JSLT_IMM   => emit_jslt_imm(self, dst, insn.imm, target_pc),
                 ebpf::JSLE_IMM   => emit_jsle_imm(self, dst, insn.imm, target_pc),
 
-//              ebpf::CALL_IMM   => {
-//                  // For JIT, syscalls MUST be registered at compile time. They can be
-//                  // updated later, but not created after compiling (we need the address of the
-//                  // syscall function in the JIT-compiled program).
+                ebpf::CALL_IMM   => {
+                    // For JIT, syscalls MUST be registered at compile time. They can be
+                    // updated later, but not created after compiling (we need the address of the
+                    // syscall function in the JIT-compiled program).
 
-//                  let mut resolved = false;
-//                  let (syscalls, calls) = if self.config.static_syscalls {
-//                      (insn.src == 0, insn.src != 0)
-//                  } else {
-//                      (true, true)
-//                  };
+                    let mut resolved = false;
+                    let (_syscalls, calls) = if self.config.static_syscalls {
+                        (insn.src == 0, insn.src != 0)
+                    } else {
+                        (true, true)
+                    };
 
+                    // TODO implement syscalls
 //                  if syscalls {
 //                      if let Some(syscall) = executable.get_syscall_registry().lookup_syscall(insn.imm as u32) {
 //                          if self.config.enable_instruction_meter {
@@ -1384,21 +1469,21 @@ impl Compiler {
 //                      }
 //                  }
 
-//                  if calls {
-//                      if let Some(target_pc) = executable.lookup_bpf_function(insn.imm as u32) {
-//                          emit_bpf_call(self, Value::Constant64(target_pc as i64, false));
-//                          resolved = true;
-//                      }
-//                  }
+                    if calls {
+                        if let Some(target_pc) = executable.lookup_bpf_function(insn.imm as u32) {
+                            emit_bpf_call(self, Value::Constant64(target_pc as i64, false));
+                            resolved = true;
+                        }
+                    }
 
-//                  if !resolved {
-//                      emit_load_immediate(self, OperandSize::S64, RSCRATCH, self.pc as i64);
-//                      emit_jump_to_anchor(self, Register::X0, ANCHOR_CALL_UNSUPPORTED_INSTRUCTION);
-//                  }
-//              },
-//              ebpf::CALL_REG  => {
-//                  emit_bpf_call(self, Value::Register(REGISTER_MAP[insn.imm as usize]));
-//              },
+                    if !resolved {
+                        emit_load_immediate(self, OperandSize::S64, RSCRATCH, self.pc as i64);
+                        emit_jump_to_anchor(self, Register::X0, ANCHOR_CALL_UNSUPPORTED_INSTRUCTION);
+                    }
+                },
+                ebpf::CALL_REG  => {
+                    emit_bpf_call(self, Value::Register(REGISTER_MAP[insn.imm as usize]));
+                },
                 ebpf::EXIT      => {
                     let call_depth_offset = slot_on_environment_stack(self, EnvironmentStackSlot::CallDepth);
                     // we only need the lower 32 bits of this since the max call depth is 32 bits
@@ -1431,7 +1516,7 @@ impl Compiler {
             self.pc += 1;
         }
         // Bumper so that the linear search of ANCHOR_TRANSLATE_PC can not run off
-        self.result.pc_section[self.pc] = unsafe { text_section_base.add(self.offset_in_text_section) } as usize;
+        self.add_to_pc_section(self.offset_in_text_section);
 
         // Bumper in case there was no final exit
         if self.offset_in_text_section + MAX_MACHINE_CODE_LENGTH_PER_INSTRUCTION > self.result.text_section.len() {
@@ -1680,38 +1765,103 @@ impl Compiler {
 //      emit_ins(self, RiscVInstruction::store(OperandSize::S64, RSCRATCH, Register::SP, X86IndirectAccess::OffsetIndexShift(0, Register::SP, 0))); // Save original RSCRATCH
 //      emit_ins(self, RiscVInstruction::load(OperandSize::S64, Register::SP, RSCRATCH, X86IndirectAccess::OffsetIndexShift(8 * (SCRATCH_REGS + 1) as i32, Register::SP, 0))); // Load return address
         for (_, reg) in REGISTER_MAP.iter().skip(FIRST_SCRATCH_REG).take(SCRATCH_REGS).enumerate() {
-            emit_push(self, *reg);
-//          emit_ins(self, RiscVInstruction::store(OperandSize::S64, *reg, Register::SP, X86IndirectAccess::OffsetIndexShift(8 * (SCRATCH_REGS - i + 1) as i32, Register::SP, 0))); // Push SCRATCH_REG
+//          emit_ins(self, RiscVInstruction::store(OperandSize::S64, *reg, Register::SP, X86IndirectAccess::OffsetIndexShift(8 * (SCRATCH_REGS - i + 1) as i32, Register::SP, 0)));
+            emit_push(self, *reg); // Push SCRATCH_REG
         }
-//      // Push the caller's frame pointer. The code to restore it is emitted at the end of emit_bpf_call().
+        // Push the caller's frame pointer. The code to restore it is emitted at the end of emit_bpf_call().
 //      emit_ins(self, RiscVInstruction::store(OperandSize::S64, REGISTER_MAP[FRAME_PTR_REG], Register::SP, X86IndirectAccess::OffsetIndexShift(8, Register::SP, 0)));
+        emit_push(self, REGISTER_MAP[FRAME_PTR_REG]);
 //      emit_ins(self, RiscVInstruction::xchg(OperandSize::S64, RSCRATCH, Register::SP, Some(X86IndirectAccess::OffsetIndexShift(0, Register::SP, 0)))); // Push return address and restore original RSCRATCH
+        emit_push(self, RSCRATCH); // Save original RSCRATCH
 
-//      // Increase CallDepth
+        // Increase CallDepth
 //      let call_depth_access = X86IndirectAccess::Offset(slot_on_environment_stack(self, EnvironmentStackSlot::CallDepth));
 //      emit_ins(self, RiscVInstruction::alu(OperandSize::S64, 0x81, 0, Register::T6, 1, Some(call_depth_access)));
 //      emit_ins(self, RiscVInstruction::load(OperandSize::S64, Register::T6, REGISTER_MAP[FRAME_PTR_REG], call_depth_access));
-//      // If CallDepth == self.config.max_call_depth, stop and return CallDepthExceeded
+        emit_load_offset(self, OperandSize::S64, Register::T6, RSCRATCH, slot_on_environment_stack(self, EnvironmentStackSlot::CallDepth));
+        emit_add_imm(self, OperandSize::S32, RSCRATCH, 1); // assume max_call_depth < 2^32
+        emit_store_offset(self, OperandSize::S64, Register::T6, RSCRATCH, slot_on_environment_stack(self, EnvironmentStackSlot::CallDepth));
+        // TODO If CallDepth == self.config.max_call_depth, stop and return CallDepthExceeded
 //      emit_ins(self, RiscVInstruction::cmp_immediate(OperandSize::S32, REGISTER_MAP[FRAME_PTR_REG], self.config.max_call_depth as i64, None));
 //      emit_ins(self, RiscVInstruction::conditional_jump_immediate(0x83, self.relative_to_anchor(ANCHOR_CALL_DEPTH_EXCEEDED)));
 
-//      // Setup the frame pointer for the new frame. What we do depends on whether we're using dynamic or fixed frames.
+        // Setup the frame pointer for the new frame. What we do depends on whether we're using dynamic or fixed frames.
 //      let frame_ptr_access = X86IndirectAccess::Offset(slot_on_environment_stack(self, EnvironmentStackSlot::BpfFramePtr));
-//      if self.config.dynamic_stack_frames {
+        if self.config.dynamic_stack_frames {
 //          // When dynamic frames are on, the next frame starts at the end of the current frame
 //          let stack_ptr_access = X86IndirectAccess::Offset(slot_on_environment_stack(self, EnvironmentStackSlot::BpfStackPtr));
 //          emit_ins(self, RiscVInstruction::load(OperandSize::S64, Register::T6, REGISTER_MAP[FRAME_PTR_REG], stack_ptr_access));
+            emit_load_offset(self, OperandSize::S64, Register::T6, RSCRATCH, slot_on_environment_stack(self, EnvironmentStackSlot::BpfStackPtr));
 //          emit_ins(self, RiscVInstruction::store(OperandSize::S64, REGISTER_MAP[FRAME_PTR_REG], Register::T6, frame_ptr_access));
-//      } else {
-//          // With fixed frames we start the new frame at the next fixed offset
+            emit_store_offset(self, OperandSize::S64, Register::T6, RSCRATCH, slot_on_environment_stack(self, EnvironmentStackSlot::BpfFramePtr));
+        } else {
+            //TODO
+            panic!("static stack frames unimplemented");
+            // With fixed frames we start the new frame at the next fixed offset
 //          let stack_frame_size = self.config.stack_frame_size as i64 * if self.config.enable_stack_frame_gaps { 2 } else { 1 };
 //          emit_ins(self, RiscVInstruction::alu(OperandSize::S64, 0x81, 0, Register::T6, stack_frame_size, Some(frame_ptr_access))); // frame_ptr += stack_frame_size;
 //          emit_ins(self, RiscVInstruction::load(OperandSize::S64, Register::T6, REGISTER_MAP[FRAME_PTR_REG], frame_ptr_access)); // Load BpfFramePtr
-//      }
-//      emit_return(self);
+        }
+        emit_return(self);
 
         // Routine for emit_bpf_call(Value::Register())
         self.set_anchor(ANCHOR_BPF_CALL_REG);
+        // Force alignment of RAX
+//      emit_ins(self, X86Instruction::alu(OperandSize::S64, 0x81, 4, REGISTER_MAP[0], !(INSN_SIZE as i64 - 1), None)); // RAX &= !(INSN_SIZE - 1);
+        emit_and_imm(self, OperandSize::S64, REGISTER_MAP[0], !(INSN_SIZE as i64 - 1)); // RAX &= !(INSN_SIZE - 1);
+
+        // Upper bound check
+        // if(RAX >= self.program_vm_addr + number_of_instructions * INSN_SIZE) throw CALL_OUTSIDE_TEXT_SEGMENT;
+        let number_of_instructions = self.result.pc_section.len() - 1;
+//      emit_ins(self, X86Instruction::load_immediate(OperandSize::S64, REGISTER_MAP[FRAME_PTR_REG], self.program_vm_addr as i64 + (number_of_instructions * INSN_SIZE) as i64));
+        emit_load_immediate(self, OperandSize::S64, REGISTER_MAP[FRAME_PTR_REG], self.program_vm_addr as i64 + (number_of_instructions * INSN_SIZE) as i64);
+//      emit_ins(self, X86Instruction::cmp(OperandSize::S64, REGISTER_MAP[FRAME_PTR_REG], REGISTER_MAP[0], None));
+//      emit_ins(self, X86Instruction::conditional_jump_immediate(0x83, self.relative_to_anchor(ANCHOR_CALL_OUTSIDE_TEXT_SEGMENT, 6)));
+        emit_ins(self, RiscVInstruction::bltu(REGISTER_MAP[FRAME_PTR_REG][1], REGISTER_MAP[0][1], 4 * 5));
+        emit_ins(self, RiscVInstruction::bne(REGISTER_MAP[FRAME_PTR_REG][1], REGISTER_MAP[0][1], 4 * 2));
+        emit_ins(self, RiscVInstruction::bltu(REGISTER_MAP[FRAME_PTR_REG][0], REGISTER_MAP[0][0], 4 * 3));
+        emit_long_jump_to_anchor(self, Register::X0, ANCHOR_CALL_OUTSIDE_TEXT_SEGMENT);
+
+        // Lower bound check
+        // if(RAX < self.program_vm_addr) throw CALL_OUTSIDE_TEXT_SEGMENT;
+//      emit_ins(self, X86Instruction::load_immediate(OperandSize::S64, REGISTER_MAP[FRAME_PTR_REG], self.program_vm_addr as i64));
+        emit_load_immediate(self, OperandSize::S64, REGISTER_MAP[FRAME_PTR_REG], self.program_vm_addr as i64);
+//      emit_ins(self, X86Instruction::cmp(OperandSize::S64, REGISTER_MAP[FRAME_PTR_REG], REGISTER_MAP[0], None));
+//      emit_ins(self, X86Instruction::conditional_jump_immediate(0x82, self.relative_to_anchor(ANCHOR_CALL_OUTSIDE_TEXT_SEGMENT, 6)));
+        emit_ins(self, RiscVInstruction::bltu(REGISTER_MAP[0][1], REGISTER_MAP[FRAME_PTR_REG][1], 4 * 5));
+        emit_ins(self, RiscVInstruction::bne(REGISTER_MAP[0][1], REGISTER_MAP[FRAME_PTR_REG][1], 4 * 2));
+        emit_ins(self, RiscVInstruction::bleu(REGISTER_MAP[0][0], REGISTER_MAP[FRAME_PTR_REG][0], 4 * 3));
+        emit_long_jump_to_anchor(self, Register::X0, ANCHOR_CALL_OUTSIDE_TEXT_SEGMENT);
+
+        // Calculate offset relative to instruction_addresses
+//      emit_ins(self, X86Instruction::alu(OperandSize::S64, 0x29, REGISTER_MAP[FRAME_PTR_REG], REGISTER_MAP[0], 0, None));
+        emit_sub(self, OperandSize::S64, REGISTER_MAP[FRAME_PTR_REG], REGISTER_MAP[0]); // RAX -= self.program_vm_addr;
+        // Calculate the target_pc (dst / INSN_SIZE) to update the instruction_meter
+//      let shift_amount = INSN_SIZE.trailing_zeros();
+//      debug_assert_eq!(INSN_SIZE, 1 << shift_amount);
+//      emit_ins(self, X86Instruction::mov(OperandSize::S64, REGISTER_MAP[0], R11));
+//      emit_mov(self, OperandSize::S64, REGISTER_MAP[0], RSCRATCH);
+//      emit_ins(self, X86Instruction::alu(OperandSize::S64, 0xc1, 5, R11, shift_amount as i64, None));
+//      emit_rsh_imm(self, OperandSize::S64, RSCRATCH, shift_amount as i64);
+        // TODO Save BPF target pc for potential ANCHOR_CALLX_UNSUPPORTED_INSTRUCTION
+//      emit_ins(self, X86Instruction::store(OperandSize::S64, R11, RSP, X86IndirectAccess::OffsetIndexShift(-8, RSP, 0))); // RSP[-8] = R11;
+        // Load host target_address from self.result.pc_section
+//      debug_assert_eq!(INSN_SIZE, 8); // Because the instruction size is also the slot size we do not need to shift the offset
+        emit_ins(self, RiscVInstruction::srli(REGISTER_MAP[0][0], REGISTER_MAP[0][0], 1)); // We need to shift once because the BPF instruction size is twice a RISCV32 pointer size
+//      emit_ins(self, X86Instruction::load_immediate(OperandSize::S64, REGISTER_MAP[FRAME_PTR_REG], self.result.pc_section.as_ptr() as i64));
+        emit_load_symbol_address(self, REGISTER_MAP[FRAME_PTR_REG][0], "pc_offsets");
+//      emit_ins(self, X86Instruction::alu(OperandSize::S64, 0x01, REGISTER_MAP[FRAME_PTR_REG], REGISTER_MAP[0], 0, None));
+        emit_ins(self, RiscVInstruction::add(REGISTER_MAP[0][0], REGISTER_MAP[FRAME_PTR_REG][0], REGISTER_MAP[0][0])); // r00 += pc_offsets;
+//      emit_ins(self, X86Instruction::load(OperandSize::S64, REGISTER_MAP[0], REGISTER_MAP[0], X86IndirectAccess::Offset(0)));
+        emit_ins(self, RiscVInstruction::lw(REGISTER_MAP[0][0], REGISTER_MAP[0][0], 0)); // r00 = pc_offsets[RAX / 8];
+        emit_load_symbol_address(self, REGISTER_MAP[0][1], "program_main"); // r01 = program_main;
+        emit_ins(self, RiscVInstruction::add(REGISTER_MAP[0][0], REGISTER_MAP[0][1], REGISTER_MAP[0][0])); // r00 += r01;
+        // Load the frame pointer again since we've clobbered REGISTER_MAP[FRAME_PTR_REG]
+//      emit_ins(self, X86Instruction::load(OperandSize::S64, RBP, REGISTER_MAP[FRAME_PTR_REG], X86IndirectAccess::Offset(slot_on_environment_stack(self, EnvironmentStackSlot::BpfFramePtr))));
+        let frame_ptr_offset = slot_on_environment_stack(self, EnvironmentStackSlot::BpfFramePtr);
+        emit_load_offset(self, OperandSize::S64, Register::T6, REGISTER_MAP[FRAME_PTR_REG], frame_ptr_offset);
+//      emit_ins(self, X86Instruction::return_near());
+        emit_return(self);
 
         // Translates a host pc back to a BPF pc by linear search of the pc_section table
         self.set_anchor(ANCHOR_TRANSLATE_PC);
@@ -1762,8 +1912,15 @@ impl Compiler {
         Ok(())
     }
 
+    fn add_to_pc_section(&mut self, offset : usize) {
+        let text_section_base = self.result.text_section.as_ptr();
+        self.result.pc_section[self.pc] = unsafe { text_section_base.add(offset) } as usize;
+        self.pc_offsets[self.pc] = offset as u32;
+    }
+
     fn set_anchor(&mut self, anchor: usize) {
         self.anchors[anchor] = unsafe { self.result.text_section.as_ptr().add(self.offset_in_text_section) };
+        self.anchor_offsets[anchor] = self.offset_in_text_section;
     }
 
     #[inline]
@@ -1796,7 +1953,7 @@ impl Compiler {
             let offset = unsafe { destination.offset_from(jump.location) } as i32; // Relative jump
             let (upper, lower) = make_split_immediate(offset);
             let original_instr2 = unsafe { ptr::read_unaligned((jump.location as *mut i32).add(1)) };
-            let instr1 = RiscVInstruction::auipc(RSCRATCH2, upper).encode() as i32;
+            let instr1 = RiscVInstruction::auipc(RSCRATCH2[0], upper).encode() as i32;
             let instr2 = (lower << 20) | (original_instr2 & ((1 << 20) - 1));
             unsafe {
                 ptr::write_unaligned(jump.location as *mut i32, instr1);
