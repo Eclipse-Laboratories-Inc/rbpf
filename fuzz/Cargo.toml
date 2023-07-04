@@ -14,6 +14,7 @@ libfuzzer-sys = "0.4"
 num-traits = "0.2"
 rayon = "1.5"
 test_utils = { path = "../test_utils/" }
+rvsim = "0.2.2"
 
 [dependencies.solana_rbpf]
 path = ".."
@@ -53,5 +54,17 @@ doc = false
 [[bin]]
 name = "verify-semantic-aware"
 path = "fuzz_targets/verify_semantic_aware.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "riscv_add64"
+path = "fuzz_targets/riscv_add64.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "riscv_lddw"
+path = "fuzz_targets/riscv_lddw.rs"
 test = false
 doc = false

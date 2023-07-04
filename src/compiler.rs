@@ -35,7 +35,7 @@ use crate::{
 };
 
 const MAX_EMPTY_PROGRAM_MACHINE_CODE_LENGTH: usize = 4096;
-const MAX_MACHINE_CODE_LENGTH_PER_INSTRUCTION: usize = 110;
+const MAX_MACHINE_CODE_LENGTH_PER_INSTRUCTION: usize = 256;
 const MACHINE_CODE_PER_INSTRUCTION_METER_CHECKPOINT: usize = 13;
 
 pub struct ProgramSections {
@@ -113,7 +113,7 @@ const ANCHOR_MEMORY_ACCESS_VIOLATION: usize = 17;
 const ANCHOR_TRANSLATE_MEMORY_ADDRESS: usize = 25;
 const ANCHOR_COUNT: usize = 33; // Update me when adding or removing anchors
 
-const REGISTER_MAP: [[Register; 2]; 11] = [
+pub const REGISTER_MAP: [[Register; 2]; 11] = [
     [CALLER_SAVED_REGISTERS[1], CALLER_SAVED_REGISTERS[2]],
     [ARGUMENT_REGISTERS[1], ARGUMENT_REGISTERS[2]],
     [ARGUMENT_REGISTERS[3], ARGUMENT_REGISTERS[4]],
@@ -482,7 +482,7 @@ fn make_split_immediate(imm: i32) -> (i32, i32) {
     if imm & (1 << 11) == 0 {
         (imm, imm)
     } else {
-        (imm + (1 << 12), imm)
+        (imm.wrapping_add(1 << 12), imm)
     }
 }
 
@@ -538,7 +538,7 @@ fn emit_riscv_li(comp: &mut Compiler, dst: Register, imm: i32) {
 #[inline]
 fn emit_riscv_li_controlled(comp: &mut Compiler, dst: Register, imm: i32, force_two_instructions : bool) {
     let (upper, lower) = make_split_immediate(imm);
-    if force_two_instructions || upper >> 12 == 0 {
+    if !force_two_instructions && upper >> 12 == 0 {
         emit_ins(comp, RiscVInstruction::addi(Register::X0, dst, lower));
     } else {
         emit_ins(comp, RiscVInstruction::lui(dst, upper));
@@ -1061,6 +1061,7 @@ pub struct Compiler {
     environment_stack_key: i32,
     program_argument_key: i32,
     err_kind_offset: usize,
+    pub restore_registers: bool,
 }
 
 impl Index<usize> for Compiler {
@@ -1148,6 +1149,7 @@ impl Compiler {
             environment_stack_key,
             program_argument_key,
             err_kind_offset: (is_err == 0) as usize,
+            restore_registers: true,
         })
     }
 
@@ -1620,16 +1622,18 @@ impl Compiler {
 //      emit_ins(self, RiscVInstruction::mv(OperandSize::S64, ARGUMENT_REGISTERS[0], RAX));
         // Restore stack pointer
         emit_ins(self, RiscVInstruction::addi(Register::T6, Register::SP, slot_on_environment_stack(self, EnvironmentStackSlot::LastSavedRegister)));
-        // Save BPF registers for use by the wrapper
-        emit_address_translation(self, Value::Constant64(0x200000000, false));
-        for reg in REGISTER_MAP.iter() {
-            emit_store(self, OperandSize::S64, RSCRATCH[0], *reg);
-            emit_ins(self, RiscVInstruction::addi(RSCRATCH[0], RSCRATCH[0], 8));
-        }
-        // Restore registers
-        for reg in CALLEE_SAVED_REGISTERS.iter().rev() {
-            if *reg != Register::SP {
-                emit_riscv_pop(self, *reg);
+        if self.restore_registers {
+            // Save BPF registers for use by the wrapper
+            emit_address_translation(self, Value::Constant64(0x200000000, false));
+            for reg in REGISTER_MAP.iter() {
+                emit_store(self, OperandSize::S64, RSCRATCH[0], *reg);
+                emit_ins(self, RiscVInstruction::addi(RSCRATCH[0], RSCRATCH[0], 8));
+            }
+            // Restore registers
+            for reg in CALLEE_SAVED_REGISTERS.iter().rev() {
+                if *reg != Register::SP {
+                    emit_riscv_pop(self, *reg);
+                }
             }
         }
         emit_return(self);
