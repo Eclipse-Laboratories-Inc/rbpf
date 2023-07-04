@@ -341,6 +341,16 @@ impl RiscVInstruction {
     }
 
     #[inline]
+    pub const fn ebreak() -> Self {
+        Self {
+            format: InstructionFormat::I,
+            opcode: 0b1110011,
+            immediate: 1,
+            ..Self::DEFAULT
+        }
+    }
+
+    #[inline]
     pub const fn slli(source: Register, destination: Register, immediate: i32) -> Self {
         Self::_slli(source, destination, immediate & 0b11111)
     }
